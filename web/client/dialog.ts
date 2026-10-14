@@ -1,0 +1,22 @@
+export function button(label: string, action?: string): HTMLButtonElement { const element = document.createElement('button'); element.type = 'button'; element.textContent = label; if (action) element.dataset.action = action; return element; }
+export function field(label: string, control: HTMLElement): HTMLLabelElement { const element = document.createElement('label'); const caption = document.createElement('span'); caption.textContent = label; element.append(caption, control); return element; }
+export function input(type = 'text', value = ''): HTMLInputElement { const element = document.createElement('input'); element.type = type; if (type === 'checkbox') element.checked = value === 'true'; else element.value = value; return element; }
+export function select(values: (string | [string, string])[], value: string): HTMLSelectElement { const element = document.createElement('select'); for (const entry of values) { const [key, label] = typeof entry === 'string' ? [entry, entry] : entry; const option = document.createElement('option'); option.value = key; option.textContent = label; element.append(option); } element.value = value; return element; }
+export interface Modal { element: HTMLDialogElement; body: HTMLElement; footer: HTMLElement; close: () => void }
+export function modal(root: HTMLElement, title: string): Modal {
+  const existing=root.querySelector('dialog');existing?.dispatchEvent(new Event('mori-dismiss'));existing?.remove(); const previous = document.activeElement as HTMLElement | null;
+  const element = document.createElement('dialog'); element.className = 'dialog'; element.setAttribute('aria-modal', 'true');
+  const header = document.createElement('header'), heading = document.createElement('h2'); heading.textContent = title; heading.id = 'dialog-title'; element.setAttribute('aria-labelledby', heading.id);
+  const dismiss = button('Close'); dismiss.setAttribute('aria-label', `Close ${title}`); const body = document.createElement('div'); body.className = 'dialog-body'; const footer = document.createElement('footer');
+  const close = () => { if (element.open && typeof element.close === 'function') element.close(); element.remove();element.dispatchEvent(new Event('mori-dismiss')); previous?.focus(); };
+  dismiss.addEventListener('click', close); header.append(heading, dismiss); element.append(header, body, footer); root.append(element);
+  element.addEventListener('cancel', event => { event.preventDefault(); close(); });
+  element.addEventListener('click', event => { if (event.target === element) close(); });
+  element.addEventListener('keydown', event => { if (event.key === 'Escape') { event.preventDefault(); close(); } if (event.key === 'Tab') { const controls = [...element.querySelectorAll<HTMLElement>('button:not(:disabled),input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex="0"]')].filter(control=>control.tabIndex>=0&&!control.closest('[hidden]')&&control.getAttribute('type')!=='hidden'); if(controls.length){event.preventDefault();const index=controls.indexOf(document.activeElement as HTMLElement),next=(index+(event.shiftKey?-1:1)+controls.length)%controls.length;controls[next].focus();} } });
+  if (typeof element.showModal === 'function') element.showModal(); else element.setAttribute('open', '');
+  queueMicrotask(() => body.querySelector<HTMLElement>('input,select,textarea,button')?.focus());
+  return { element, body, footer, close };
+}
+export function promptValue(root: HTMLElement, title: string, label: string, value = ''): Promise<string | null> {
+  return new Promise(resolve => { const dialog = modal(root, title), control = input('text', value); dialog.body.append(field(label, control)); const apply = button('Apply'); const originalClose = dialog.close; let resolved = false; const finish = (value: string | null) => { if (resolved) return; resolved = true; resolve(value); originalClose(); }; apply.addEventListener('click', () => finish(control.value)); dialog.element.addEventListener('mori-dismiss',()=>finish(null)); dialog.footer.append(apply); dialog.element.addEventListener('cancel', () => finish(null)); dialog.element.querySelector('header button')!.addEventListener('click', () => finish(null)); dialog.element.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target === control) { event.preventDefault(); finish(control.value); } if (event.key === 'Escape') finish(null); }); });
+}

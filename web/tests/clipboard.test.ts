@@ -1,0 +1,13 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { JSDOM } from 'jsdom';
+import { htmlToMarkdown } from '../core/clipboard.ts';
+globalThis.window = new JSDOM('').window as any;
+test('rich text retains headings, formatting and Korean',()=>assert.equal(htmlToMarkdown('<h2>제목</h2><p><strong>굵게</strong> <em>기울임</em><br>다음</p>'),'## 제목\n\n**굵게** *기울임*  \n다음'));
+test('literal markdown metacharacters remain literal',()=>assert.equal(htmlToMarkdown('<p>*literal* [word] \\</p>'),'\\*literal\\* \\[word\\] \\\\'));
+test('code fence grows beyond embedded backticks',()=>assert.equal(htmlToMarkdown('<pre><code class="language-js">const x = ```;\n</code></pre>'),'````js\nconst x = ```;\n````'));
+test('lists and quotes remain structural',()=>assert.equal(htmlToMarkdown('<blockquote><p>quote</p></blockquote><ol start="3"><li>one</li><li>two<ul><li>child</li></ul></li></ol>'),'> quote\n\n3. one\n4. two\n   - child'));
+test('safe links and images retain title and escaped paths',()=>assert.equal(htmlToMarkdown('<p><a href="https://example.com/a b" title="제목">link</a> <img src="assets/a.png" alt="그림"></p>'),'[link](<https://example.com/a b> "제목") ![그림](<assets/a.png>)'));
+test('rectangular tables become editable Markdown',()=>assert.equal(htmlToMarkdown('<table><tr><th>A</th><th>B</th></tr><tr><td>one|two</td><td>42</td></tr></table>'),'| A | B |\n| --- | --- |\n| one\\|two | 42 |'));
+test('complex tables preserve sanitized HTML rather than losing merged cells',()=>assert.match(htmlToMarkdown('<table><tr><td colspan="2">keep</td></tr></table>'),/colspan="2">keep/));
+test('active content and unsafe URLs never become Markdown links',()=>assert.equal(htmlToMarkdown('<script>bad()</script><p onclick="bad()"><a href="javascript:bad()">safe text</a></p>'),'safe text'));
