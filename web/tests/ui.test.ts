@@ -455,7 +455,8 @@ test('live task clicks return focus to the editor so keyboard undo reaches the s
     const checkbox=document.querySelector<HTMLInputElement>('.live-block input[data-mori-task="true"]')!;
     checkbox.focus();assert.equal(editor.view.hasFocus,false);checkbox.click();
     assert.equal(editor.text(),'- [x] task\n\nend');assert.equal(editor.view.hasFocus,true);
-    editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',{key:'z',code:'KeyZ',metaKey:true,bubbles:true,cancelable:true}));
+    const mac=process.platform==='darwin';
+    editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',{key:'z',code:'KeyZ',metaKey:mac,ctrlKey:!mac,bubbles:true,cancelable:true}));
     assert.equal(editor.text(),'- [ ] task\n\nend');
   }finally{editor.destroy();}
 });
