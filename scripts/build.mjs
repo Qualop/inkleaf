@@ -41,7 +41,7 @@ await writeFile(path.join(contents,'Info.plist'),`<?xml version="1.0" encoding="
 <key>CFBundleIdentifier</key><string>dev.inkleaf.editor</string><key>CFBundleExecutable</key><string>Inkleaf</string>
 <key>CFBundlePackageType</key><string>APPL</string><key>CFBundleShortVersionString</key><string>${version}</string>
 <key>CFBundleIconFile</key><string>AppIcon</string>
-<key>CFBundleVersion</key><string>1</string><key>LSMinimumSystemVersion</key><string>14.5</string>
+<key>CFBundleVersion</key><string>${version}</string><key>LSMinimumSystemVersion</key><string>14.5</string>
 <key>NSHighResolutionCapable</key><true/><key>NSPrincipalClass</key><string>NSApplication</string>
 <key>CFBundleDocumentTypes</key><array><dict><key>CFBundleTypeName</key><string>Markdown</string>
 <key>CFBundleTypeRole</key><string>Editor</string><key>LSHandlerRank</key><string>Alternate</string>
