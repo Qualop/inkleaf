@@ -34,6 +34,13 @@ await run('/usr/bin/iconutil',['-c','icns',iconset,'-o',path.join(contents,`Reso
 }
 await cp(path.join(contents,'Resources/AppIcon-ink.icns'),path.join(contents,'Resources/AppIcon.icns'));
 await cp(path.join(bin,'Inkleaf'),path.join(contents,'MacOS/Inkleaf'));
+// Debug/local symbols can contain the build machine's home and source paths.
+const executable=path.join(contents,'MacOS/Inkleaf');
+await run('/usr/bin/strip',['-S','-x',executable]);
+const executableBytes=await readFile(executable);
+if([root,process.env.HOME].filter(Boolean).some(value=>executableBytes.includes(Buffer.from(value)))){
+  throw new Error('The release executable still contains a private build path.');
+}
 const frameworks=[];
 for(const identity of await readdir(path.join(root,'.build/artifacts'))){
   const candidate=path.join(root,'.build/artifacts',identity,'Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework');
