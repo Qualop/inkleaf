@@ -60,9 +60,10 @@ function decorate(state: EditorState, viewport: { from: number; to: number }, op
   if (end - start > 24_000) return Decoration.none;
   const decorations: { from: number; to: number; decoration: Decoration }[] = [];
   const selections = state.selection.ranges;
-  const blocks = markdownBlocks(source.slice(start, end));
+  const blocks = markdownBlocks(source.slice(start, end),{preserveSourceLines:true});
   for (const block of blocks) {
-    const from = sourceToCM(source, start + block.from), rawTo = sourceToCM(source, start + block.to);
+    const from = sourceToCM(source, start + block.from), rawTo = sourceToCM(source, start + (block.contentTo??block.to));
+    // Exclude separators using the last child token; nested code/HTML still owns its blank lines.
     const to = state.doc.lineAt(Math.max(from, rawTo - 1)).to;
     if (to <= from || selections.some(selection => selection.from <= to && selection.to >= from)) continue;
     decorations.push({ from, to, decoration: Decoration.replace({ block: true, widget: new MarkdownWidget(block.html, from,to, options) }) });

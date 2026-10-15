@@ -17,14 +17,14 @@ final class ExportController {
     @discardableResult func cancel(jobId: String)->Bool{let accepted=jobs.cancel(jobId);if accepted{pages[jobId]?.cancel()};return accepted}
     func committedPath(jobId:String)->String?{jobs.outputPath(jobId)}
 
-    func pandocExecutable() async throws -> String {
-        let bundled = Bundle.main.resourceURL?.appendingPathComponent("tools/pandoc").path
-        if let bundled, FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
+    func pandocExecutable(resourceDirectory: URL? = Bundle.main.resourceURL) async throws -> String {
         let values = try await settings.all()
         if case .string(let path) = values["pandocPath"], !path.isEmpty {
             guard FileManager.default.isExecutableFile(atPath: path) else { throw BridgeError.unavailable("Configured Pandoc is not executable: \(path)") }
             return path
         }
+        let bundled = resourceDirectory?.appendingPathComponent("tools/pandoc").path
+        if let bundled, FileManager.default.isExecutableFile(atPath: bundled) { return bundled }
         let directories = (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map(String.init)
             + ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]
         for directory in directories where directory.hasPrefix("/") {

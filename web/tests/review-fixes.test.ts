@@ -9,6 +9,7 @@ import { mountApp } from '../client/app.ts';
 import { parseTable, serializeTable, updateCell, moveColumn, moveRow, insertColumn, removeColumn, insertRow, removeRow, setAlignment } from '../core/tables.ts';
 import { getOutline } from '../core/statistics.ts';
 import { renderMarkdown, markdownBlocks, exportHTML } from '../render/markdown.ts';
+import { COMMANDS } from '../core/commands.ts';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://mori.local/', pretendToBeVisual: true });
 const win = dom.window;
@@ -206,4 +207,133 @@ test('#12 a live link to the duplicate heading navigates to its original source 
     const link = document.querySelector<HTMLAnchorElement>('.live-block a[href="#same-1"]');
     assert.ok(link); link.click(); assert.deepEqual(app.editor.selection(), { from: 8, to: 14 });
   } finally { app.destroy(); delete (win as any).webkit; }
+});
+
+test('mac editing audit: replacing shorter source never leaves the caret inside an emoji',()=>{
+  const editor=new DocumentEditor(root());try{
+    editor.open({...snapshot,text:'ab'});editor.select({from:1,to:1});editor.replace('😀');
+    assert.deepEqual(editor.selection(),{from:0,to:0});
+    editor.command({type:'bold'});assert.equal(editor.text(),'****😀');
+    assert.equal(undo(editor.view),true);assert.equal(editor.text(),'😀');
+    assert.equal(undo(editor.view),true);assert.equal(editor.text(),'ab');assert.deepEqual(editor.selection(),{from:1,to:1});
+    assert.equal(redo(editor.view),true);assert.equal(editor.text(),'😀');assert.deepEqual(editor.selection(),{from:2,to:2});
+  }finally{editor.destroy();}
+});
+
+const auditSource='앞\r\n한😀글\r\n뒤';
+const editingAuditCases:[string,string,any?,string?,number?,number?,string?][]=[
+  ['bold','앞\r\n**한😀글**\r\n뒤',undefined,undefined,undefined,undefined,'strong'],
+  ['italic','앞\r\n*한😀글*\r\n뒤',undefined,undefined,undefined,undefined,'em'],
+  ['underline','앞\r\n<u>한😀글</u>\r\n뒤',undefined,undefined,undefined,undefined,'u'],
+  ['strike','앞\r\n~~한😀글~~\r\n뒤',undefined,undefined,undefined,undefined,'s'],
+  ['highlight','앞\r\n==한😀글==\r\n뒤',undefined,undefined,undefined,undefined,'mark'],
+  ['sup','앞\r\n<sup>한😀글</sup>\r\n뒤',undefined,undefined,undefined,undefined,'sup'],
+  ['sub','앞\r\n<sub>한😀글</sub>\r\n뒤',undefined,undefined,undefined,undefined,'sub'],
+  ['comment','앞\r\n<!--한😀글-->\r\n뒤'],
+  ['inlineMath','앞\r\n$한😀글$\r\n뒤',undefined,undefined,undefined,undefined,'[data-math="inline"]'],
+  ['code','앞\r\n`한😀글`\r\n뒤',undefined,undefined,undefined,undefined,'code'],
+  ['heading','앞\r\n## 한😀글\r\n뒤',2,undefined,undefined,undefined,'h2'],
+  ['quote','앞\r\n> 한😀글\r\n뒤',undefined,undefined,undefined,undefined,'blockquote'],
+  ['bullet','앞\r\n- 한😀글\r\n뒤',undefined,undefined,undefined,undefined,'ul li'],
+  ['ordered','앞\r\n1. 한😀글\r\n뒤',undefined,undefined,undefined,undefined,'ol li'],
+  ['task','앞\r\n- [ ] 한😀글\r\n뒤',undefined,undefined,undefined,undefined,'input[type="checkbox"]'],
+  ['toggleTask','앞\r\n- [ ] 한😀글\r\n뒤'],
+  ['indent','앞\r\n  한😀글\r\n뒤'],
+  ['outdent',auditSource,undefined,'앞\r\n  한😀글\r\n뒤',5,9],
+  ['moveLineUp','한😀글\r\n앞\r\n뒤'],
+  ['moveLineDown','앞\r\n뒤\r\n한😀글'],
+  ['horizontalRule','앞\r\n---\r\n뒤'],
+  ['codeBlock','앞\r\n```ts\r\n한😀글\r\n```\r\n뒤','ts',undefined,undefined,undefined,'pre code.language-ts'],
+  ['mathBlock','앞\r\n$$\r\n한😀글\r\n$$\r\n뒤',undefined,undefined,undefined,undefined,'[data-math="block"]'],
+  ['toc','[TOC]',undefined,'',0,0],
+  ['yaml','---\r\n\r\n---\r\n앞\r\n한😀글\r\n뒤'],
+  ['alert','앞\r\n> [!NOTE]\r\n> 한😀글\r\n뒤','note',undefined,undefined,undefined,'[data-alert="note"]'],
+  ['clearFormat',auditSource,undefined,'앞\r\n**한😀글**\r\n뒤',5,9],
+  ['insertParagraphBefore','\r\n\r\n앞\r\n한😀글\r\n뒤'],
+  ['insertParagraphAfter','앞\r\n한😀글\r\n뒤\r\n\r\n\r\n\r\n'],
+  ['deleteBlock','앞\r\n\r\n\r\n뒤',undefined,'앞\r\n\r\n한😀글\r\n\r\n뒤',5,9],
+  ['deleteWord','앞\r\n\r\n뒤',undefined,'앞\r\nhello\r\n뒤',8,8],
+  ['link','앞\r\n[한😀글](<https://example.test/a b>)\r\n뒤','https://example.test/a b',undefined,undefined,undefined,'a[href="https://example.test/a%20b"]'],
+  ['image','앞\r\n![한😀글](assets/a.png)\r\n뒤','assets/a.png',undefined,undefined,undefined,'img'],
+  ['footnote','앞\r\n[^1]\r\n뒤\r\n\r\n[^1]: 한😀글',undefined,undefined,undefined,undefined,'.footnote-ref'],
+  ['linkReference','앞\r\n[한😀글][link-1]\r\n뒤\r\n\r\n[link-1]: https://example.test','https://example.test',undefined,undefined,undefined,'a[href="https://example.test"]'],
+];
+test('mac editing audit: every registered command has a multi-step workflow',()=>{
+  assert.deepEqual(editingAuditCases.map(row=>row[0]).sort(),COMMANDS.map(command=>command.type).sort());
+});
+for(const [type,expected,value,source=auditSource,from=3,to=7,selector] of editingAuditCases)test(`mac editing audit: ${type} survives modes, tabs, undo and redo`,()=>{
+  const editor=new DocumentEditor(root()),id='audit-'+type;try{
+    editor.open({...snapshot,documentId:id,text:source,lineEnding:'CRLF'});editor.select({from,to});
+    editor.command({type,value});assert.equal(editor.text(),expected);const selection=editor.selection();
+    for(const mode of ['source','live','reading','source'] as const){editor.mode(mode);assert.equal(editor.text(),expected);assert.deepEqual(editor.selection(),selection);}
+    editor.open({...snapshot,documentId:'other',text:'다른😀'});editor.open({...snapshot,documentId:id,text:source,lineEnding:'CRLF'});
+    assert.equal(editor.text(),expected);assert.deepEqual(editor.selection(),selection);
+    if(selector){const output=rendered(expected);assert.ok(output.querySelector(selector),type+': '+output.innerHTML);}
+    if(type==='image')assert.equal(rendered(expected).querySelector('img')!.getAttribute('alt'),'한😀글');
+    assert.equal(undo(editor.view),true,type);assert.equal(editor.text(),source,type);assert.deepEqual(editor.selection(),{from,to});
+    assert.equal(redo(editor.view),true,type);assert.equal(editor.text(),expected,type);
+  }finally{editor.destroy();}
+});
+
+test('mac editing audit: table modal composes every row/column operation, edits, alignment and history',()=>{
+  const host=root(),editor=new DocumentEditor(host),errors:unknown[]=[];
+  const source='앞\r\n\r\n| A | B |\r\n| :--- | ---: |\r\n| 한😀 | x\\|y |\r\n| keep | \\*literal\\* |\r\n\r\n뒤';
+  try{
+    editor.open({...snapshot,text:source,lineEnding:'CRLF'});editor.select({from:5,to:5});tableDialog(host,editor,()=>editor.text()===source,error=>errors.push(error));
+    const click=(label:string)=>{const control=[...host.querySelectorAll<HTMLButtonElement>('.table-dialog button')].find(button=>button.textContent===label);assert.ok(control,label);control.click();};
+    const indices=host.querySelectorAll<HTMLInputElement>('.table-tools input[type="number"]'),row=(n:number)=>indices[0].value=String(n),col=(n:number)=>indices[1].value=String(n);
+    const cell=host.querySelector<HTMLTextAreaElement>('[data-cell-row="0"][data-cell-col="0"]')!;cell.value='바뀜😀';cell.dispatchEvent(new Event('input'));
+    row(2);click('Insert row');row(3);click('Row up');row(2);click('Row down');row(2);click('Remove row');
+    col(2);click('Insert column');col(3);click('Column left');col(2);click('Column right');col(2);click('Remove column');
+    col(2);const alignment=host.querySelector<HTMLSelectElement>('.table-tools select')!;alignment.value='center';alignment.dispatchEvent(new Event('change'));
+    assert.equal(editor.text(),source);click('Apply Table');assert.deepEqual(errors,[]);
+    assert.equal(editor.text(),'앞\r\n\r\n| A | B |\r\n| :--- | :---: |\r\n| 바뀜😀 | x\\|y |\r\n| keep | \\*literal\\* |\r\n\r\n뒤');
+    const final=editor.text(),table=rendered(final).querySelector('table')!;
+    assert.deepEqual([...table.querySelectorAll('tbody td')].map(cell=>cell.textContent),['바뀜😀','x|y','keep','*literal*']);
+    assert.equal(table.querySelector('tbody td:nth-child(2)')!.getAttribute('style'),'text-align:center');
+    assert.equal(undo(editor.view),true);assert.equal(editor.text(),source);assert.equal(redo(editor.view),true);assert.equal(editor.text(),final);
+  }finally{editor.destroy();}
+});
+
+test('mac editing audit: table edits preserve the table local newlines in a mixed-ending document',()=>{
+  const host=root(),editor=new DocumentEditor(host),errors:unknown[]=[];
+  const source='앞\r\n\r\n| A |\n| - |\n| 한😀 |\n\n뒤';
+  try{
+    editor.open({...snapshot,text:source,lineEnding:'CRLF'});editor.select({from:5,to:5});tableDialog(host,editor,()=>true,error=>errors.push(error));
+    host.querySelector<HTMLButtonElement>('[data-action="table-apply"]')!.click();assert.deepEqual(errors,[]);
+    assert.equal(editor.text(),'앞\r\n\r\n| A |\n| --- |\n| 한😀 |\n\n뒤');
+    assert.equal(undo(editor.view),true);assert.equal(editor.text(),source);
+  }finally{editor.destroy();}
+});
+
+test('mac editing audit: all heading levels, alert types and preference markers render their intended structures',()=>{
+  const editor=new DocumentEditor(root());try{
+    let id=0;
+    for(let level=1;level<=6;level++){
+      editor.open({...snapshot,documentId:String(++id),text:'한😀'});editor.select({from:0,to:3});editor.command({type:'heading',value:level});
+      assert.equal(rendered(editor.text()).querySelector('h'+level)!.textContent,'한😀');assert.equal(undo(editor.view),true);assert.equal(editor.text(),'한😀');
+    }
+    for(const value of ['note','tip','important','warning','caution']){
+      editor.open({...snapshot,documentId:String(++id),text:'한😀'});editor.select({from:0,to:3});editor.command({type:'alert',value});
+      assert.equal(rendered(editor.text()).querySelector('[data-alert]')!.getAttribute('data-alert'),value);assert.equal(undo(editor.view),true);assert.equal(editor.text(),'한😀');
+    }
+    editor.configure({boldMarker:'__',italicMarker:'_',bulletMarker:'+'});
+    for(const [type,expected] of [['bold','__한😀__'],['italic','_한😀_'],['bullet','+ 한😀']]){
+      editor.open({...snapshot,documentId:String(++id),text:'한😀'});editor.select({from:0,to:3});editor.mode('reading');editor.command({type});
+      assert.equal(editor.text(),expected);assert.equal(editor.view.dom.dataset.mode,'live');assert.equal(undo(editor.view),true);assert.equal(editor.text(),'한😀');
+    }
+  }finally{editor.destroy();}
+});
+
+test('mac editing audit: heading, reference, footnote and YAML compose in one CRLF editing workflow',()=>{
+  const editor=new DocumentEditor(root());try{
+    const initial='제목\r\n\r\n참조 설명과 각주😀\r\n';editor.open({...snapshot,text:initial,lineEnding:'CRLF'});
+    editor.select({from:0,to:2});editor.command({type:'heading',value:1});
+    const ref=editor.text().indexOf('참조');editor.select({from:ref,to:ref+2});editor.command({type:'linkReference',value:'https://example.test'});
+    const note=editor.text().indexOf('각주');editor.select({from:note,to:note+4});editor.command({type:'footnote'});editor.command({type:'yaml'});
+    editor.view.dispatch({...editor.view.state.replaceSelection('title: 감사'),userEvent:'input.type'});
+    assert.equal(editor.text(),'---\r\ntitle: 감사\r\n---\r\n# 제목\r\n\r\n[참조][link-1] 설명과 [^1]\r\n\r\n[link-1]: https://example.test\r\n\r\n[^1]: 각주😀\r\n');
+    const output=rendered(editor.text());assert.equal(output.querySelector('h1')!.textContent,'제목');assert.equal(output.querySelector('a[href="https://example.test"]')!.textContent,'참조');assert.match(output.querySelector('.footnote-item')!.textContent!,/각주😀/);assert.doesNotMatch(output.textContent!,/title: 감사/);
+    editor.mode('reading');editor.mode('source');for(let i=0;i<5;i++)assert.equal(undo(editor.view),true);assert.equal(editor.text(),initial);
+  }finally{editor.destroy();}
 });

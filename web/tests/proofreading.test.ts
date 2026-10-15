@@ -53,6 +53,40 @@ test('debounced checks discard stale documents and same-text older requests',asy
   } finally {f.cleanup();}
 });
 
+test('a reply received during composition cannot decorate or notify until a fresh post-composition check',async()=>{
+  const pending:((value:any)=>void)[]=[],received:any[]=[];
+  const f=fixture('됬어요',{check:()=>new Promise(done=>pending.push(done)),onResult:(value:any)=>received.push(value)});
+  try{
+    f.view.dispatch({selection:{anchor:3}});await tick();assert.equal(pending.length,1);
+    f.view.contentDOM.dispatchEvent(new f.win.CompositionEvent('compositionstart',{bubbles:true}));
+    assert.equal(f.view.compositionStarted,true);
+    pending[0](result([issue(0,3,'spelling',['됐어요'])]));await tick();
+    assert.equal(f.view.state.field(proofreadingState).issues.length,0);assert.equal(received.length,0);
+    assert.equal(f.view.dom.querySelector('.mori-spelling'),null);assert.equal(f.view.state.selection.main.head,3);
+    f.view.contentDOM.dispatchEvent(new f.win.CompositionEvent('compositionend',{bubbles:true}));
+    await tick();assert.equal(pending.length,2,'resume checking even when composition did not change source');
+    pending[1](result([issue(0,3,'spelling',['됐어요'])]));await tick();
+    assert.equal(f.view.state.field(proofreadingState).issues.length,1);assert.equal(received.length,1);
+    assert.equal(f.view.state.doc.toString(),'됬어요');assert.equal(f.view.state.selection.main.head,3);
+  }finally{f.cleanup();}
+});
+
+test('composition suspends scheduled checks and refreshes, then checks only the final Korean source',async()=>{
+  const checked:string[]=[],received:any[]=[];
+  const f=fixture('됬',{check:async(text:string)=>{checked.push(text);return result([issue(0,text.length,'spelling',['됐어요'])]);},onResult:(value:any)=>received.push(value)});
+  try{
+    f.view.contentDOM.dispatchEvent(new f.win.CompositionEvent('compositionstart',{bubbles:true}));
+    f.view.dispatch({changes:{from:1,insert:'어요'},selection:{anchor:3},userEvent:'input.type.compose'});
+    refreshProofreading(f.view);await tick();
+    assert.deepEqual(checked,[]);assert.equal(received.length,0);assert.equal(f.view.state.field(proofreadingState).issues.length,0);
+    assert.equal(f.view.compositionStarted,true);assert.equal(f.view.state.doc.toString(),'됬어요');
+    f.view.contentDOM.dispatchEvent(new f.win.CompositionEvent('compositionend',{bubbles:true}));
+    await tick();assert.deepEqual(checked,['됬어요']);assert.equal(received.length,1);
+    assert.equal(f.view.state.field(proofreadingState).issues.length,1);assert.equal(f.view.state.selection.main.head,3);
+    assert.equal(undo(f.view),true);assert.equal(f.view.state.doc.toString(),'됬');
+  }finally{f.cleanup();}
+});
+
 test('disabling checks invalidates pending replies and clears marks immediately on refresh',async()=>{
   let enabled=true,finish!:(value:any)=>void,calls=0;
   const f=fixture('typo',{enabled:()=>enabled,check:()=>{calls++;return new Promise(done=>{finish=done;});}});

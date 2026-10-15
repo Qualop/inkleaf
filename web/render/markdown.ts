@@ -7,8 +7,9 @@ import tasks from 'markdown-it-task-lists';
 import createDOMPurify from 'dompurify';
 import highlight from 'highlight.js';
 import { getOutline } from '../core/statistics.ts';
+import { frontMatterRange } from '../core/source.ts';
 
-export type MarkdownBlock = {from:number;to:number;html:string;type:string};
+export type MarkdownBlock = {from:number;to:number;html:string;type:string;contentTo?:number};
 export type ExportOptions = {
   title?:string;author?:string;css?:string;paper?:string;margin?:number;dark?:boolean;
   outline?:boolean;tocDepth?:number;header?:string;footer?:string;appendHead?:string;appendBody?:string;
@@ -44,7 +45,8 @@ engine.inline.ruler.before('escape','mori_inline_math',(state:any,silent:boolean
   if(state.src[start]!=='$'||state.src[start+1]==='$'||/\s/.test(state.src[start+1]||''))return false;
   let end=start+1;
   while((end=state.src.indexOf('$',end))>=0){
-    if(state.src[end-1]==='\\'){end++;continue;}
+    let slashes=0;for(let before=end-1;before>=0&&state.src[before]==='\\';before--)slashes++;
+    if(slashes%2){end++;continue;}
     if(end===start+1||/\s/.test(state.src[end-1]))return false;
     if(!silent){const token=state.push('mori_math','',0);token.content=state.src.slice(start+1,end);}
     state.pos=end+1;return true;
@@ -102,9 +104,10 @@ export function sanitizeHTML(html:string):string{
     ADD_ATTR:['controls','target'],FORBID_TAGS:['script','object','embed','iframe'],FORBID_ATTR:['srcdoc']});
 }
 export function renderMarkdown(text:string):string{
-  return sanitizeHTML(engine.render(text.replace(/^\uFEFF?---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,'')));
+  const frontMatter=frontMatterRange(text);
+  return sanitizeHTML(engine.render(frontMatter?text.slice(frontMatter.to):text));
 }
-export function markdownBlocks(text:string):MarkdownBlock[]{
+export function markdownBlocks(text:string,options:{preserveSourceLines?:boolean}={}):MarkdownBlock[]{
   const lines=text.split(/\n/),positions=[0];
   for(let i=0;i<lines.length;i++)positions.push(positions[i]+lines[i].length+(i<lines.length-1?1:0));
   const tokens=engine.parse(text,{}),result:MarkdownBlock[]=[];let i=0;
@@ -113,8 +116,10 @@ export function markdownBlocks(text:string):MarkdownBlock[]{
     const start=i;let end=i+1;
     if(token.nesting===1){let depth=1;while(end<tokens.length&&depth>0){depth+=tokens[end].nesting;end++;}}
     const from=positions[token.map[0]]??text.length,to=positions[token.map[1]]??text.length;
-    const html=sanitizeHTML(engine.renderer.render(tokens.slice(start,end),engine.options,{}));
-    result.push({from,to,html,type:token.type.replace(/_open$/,'')});i=end;
+    const selected=tokens.slice(start,end);
+    const html=sanitizeHTML(engine.renderer.render(selected,options.preserveSourceLines?{...engine.options,breaks:true}:engine.options,{}));
+    const contentEnd=selected.reduce((last,item)=>item.map&&!item.type.endsWith('_close')?item.map[1]:last,token.map[1]);
+    result.push({from,to,html,type:token.type.replace(/_open$/,''),...(options.preserveSourceLines?{contentTo:positions[contentEnd]??to}:{})});i=end;
   }
   return result;
 }

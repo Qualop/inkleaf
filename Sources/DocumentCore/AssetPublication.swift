@@ -15,7 +15,9 @@ struct AssetPublication {
     static func prepare(text:String, root:String?, destination:URL, references:[DocumentAssetReference]) throws -> AssetPublication {
         guard !references.isEmpty else { return AssetPublication(text:text,created:[]) }
         guard let root else { throw DocumentError.invalidPath("Missing image asset root") }
-        let sourceRoot = try FileIO.url(root), targetRoot = destination.deletingLastPathComponent()
+        let sourceRoot = try FileIO.url(root)
+        // Resolve the existing parent separately; a new filename can retain an unresolved directory alias.
+        let targetRoot = destination.deletingLastPathComponent().standardizedFileURL.resolvingSymlinksInPath()
         let ns = text as NSString
         let sorted = references.sorted { $0.from < $1.from }
         var end = 0
@@ -29,7 +31,7 @@ struct AssetPublication {
             }
             end = reference.to
         }
-        if sourceRoot == targetRoot { return AssetPublication(text:text,created:[]) }
+        if sourceRoot.pathComponents == targetRoot.pathComponents { return AssetPublication(text:text,created:[]) }
         let assets = targetRoot.appendingPathComponent("assets",isDirectory:true).resolvingSymlinksInPath()
         guard assets.pathComponents.starts(with:targetRoot.pathComponents), assets.pathComponents.count > targetRoot.pathComponents.count else {
             throw DocumentError.invalidPath("Destination image directory escapes the document root")

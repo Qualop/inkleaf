@@ -4,6 +4,23 @@ import { JSDOM } from 'jsdom';
 import { renderMarkdown, markdownBlocks, exportHTML, exportFilename, sanitizeHTML,configureMarkdown } from '../render/markdown.ts';
 
 globalThis.window = new JSDOM('').window as any;
+test('mac editing audit: inline math closes after an even backslash run in reading and export',()=>{
+  const source=String.raw`$a\\$ and $b\$c$`;
+  const document=new JSDOM('').window.document;
+  for(const html of [renderMarkdown(source),exportHTML(source)]){
+    document.body.innerHTML=html;
+    assert.deepEqual([...document.querySelectorAll('[data-math="inline"]')].map(math=>math.textContent),[String.raw`a\\`,String.raw`b\$c`]);
+  }
+});
+test('mac editing audit: valid YAML dot terminators never leak metadata into reading or export',()=>{
+  for(const eol of ['\n','\r\n','\r']){
+    const source=`\uFEFF--- ${eol}privateField: 숨김${eol}... ${eol}# 본문${eol}${eol}유지😀`;
+    for(const html of [renderMarkdown(source),exportHTML(source)]){
+      const document=new JSDOM(html).window.document;
+      assert.doesNotMatch(document.body.textContent!,/privateField|숨김/);assert.equal(document.querySelector('h1')!.textContent,'본문');assert.match(document.body.textContent!,/유지😀/);
+    }
+  }
+});
 test('Markdown preferences have real rendering consumers without changing source',()=>{
   const source='https://example.com\n\n"quoted"...\n\n<u>raw</u>';
   try{configureMarkdown({autoLinks:false,smartPunctuation:true,renderHTML:false});const html=renderMarkdown(source);assert.doesNotMatch(html,/<a href=/);assert.match(html,/“quoted”…/);assert.match(html,/&lt;u&gt;raw/);}finally{configureMarkdown({autoLinks:true,smartPunctuation:false,renderHTML:true});}

@@ -44,4 +44,11 @@ final class ToolCoreTests: XCTestCase {
         XCTAssertFalse(result.timedOut)
         XCTAssertLessThan(result.duration, 2)
     }
+
+    func testTimeoutDoesNotWaitForInheritedPipesFromAnUnownedDescendant() async throws {
+        let result = try await ProcessRunner().run(jobId: "inherited-pipes", executable: "/bin/sh",
+            arguments: ["-c", "sleep 3 & wait"], timeout: 0.1)
+        XCTAssertTrue(result.timedOut)
+        XCTAssertLessThan(result.duration, 2, "A child inheriting stdout must not extend the tool deadline")
+    }
 }

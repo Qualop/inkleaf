@@ -204,8 +204,18 @@ export function applyCommand(text: string, selection: Selection, command: Editor
   }
   if (type === 'clearFormat') {
     const lines = sourceLines(text);
-    const start = from === to ? lines[lineAt(lines, from)].from : from;
-    const end = from === to ? lines[lineAt(lines, from)].to : to;
+    let start = from === to ? lines[lineAt(lines, from)].from : from;
+    let end = from === to ? lines[lineAt(lines, from)].to : to;
+    if(from!==to){
+      const pairs=[...Object.values(inline),['__','__'],['_','_']],plain=stripFormat(text);
+      for(;;){
+        const left=/`+$/.exec(text.slice(0,start))?.[0],right=/^`+/.exec(text.slice(end))?.[0];
+        const pair=pairs.find(([open,close])=>start>=open.length&&text.slice(start-open.length,start)===open&&text.slice(end,end+close.length)===close
+          &&stripFormat(text.slice(0,start-open.length)+text.slice(start,end)+text.slice(end+close.length))===plain)
+          ??(left&&left===right?[left,right]:undefined);
+        if(!pair)break;start-=pair[0].length;end+=pair[1].length;
+      }
+    }
     const original = text.slice(start, end), next = stripFormat(original);
     const changes: Change[] = [];
     let cursor = 0;

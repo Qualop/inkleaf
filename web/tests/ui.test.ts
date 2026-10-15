@@ -514,3 +514,94 @@ test('runTool client budget includes requested native process timeout and delive
   const messages: any[] = []; transport(message => messages.push(message)); const client = new NativeClient(win as any);
   try { const pending = client.call('runTool', { timeout: 120 }).catch(error => ({error})); assert.deepEqual(scheduled, [135000]); reply(messages[0].id, {exitCode:0,stdout:'done'}); assert.deepEqual(await pending, {exitCode:0,stdout:'done'}); } finally { client.dispose(); }
 });
+
+test('live list previews preserve empty separator lines after leaving the list',()=>{
+  for(const source of ['- 첫째\n\n다음 문단','1. 첫째\n\n다음 문단','> 인용\n\n다음 문단']){
+    const editor=new DocumentEditor(root());
+    try{
+      editor.open({...snapshot,text:source,lineEnding:'LF'});editor.select({from:source.length,to:source.length});
+      assert.equal(editor.text(),source);
+      assert.ok(editor.view.contentDOM.querySelector('.live-block'),'the previous block is rendered');
+      const blank=[...editor.view.contentDOM.querySelectorAll('.cm-line')].filter(line=>!line.textContent?.trim());
+      assert.equal(blank.length,1,`the explicit separator remains an editable blank line: ${JSON.stringify(source)}`);
+      assert.equal(editor.selection().from,source.length);
+    }finally{editor.destroy();}
+  }
+});
+
+test('two Return keys retain source newlines, caret and history in live/source and LF/CRLF',()=>{
+  for(const mode of ['live','source'] as const)for(const eol of ['\n','\r\n']){
+    const initial=`첫째${eol}둘째`,editor=new DocumentEditor(root());
+    try{
+      editor.open({...snapshot,text:initial,lineEnding:eol==='\r\n'?'CRLF':'LF'});editor.mode(mode);editor.select({from:initial.length,to:initial.length});
+      for(let index=0;index<2;index++)editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',bubbles:true,cancelable:true}));
+      const after=initial+eol+eol;assert.equal(editor.text(),after);assert.deepEqual(editor.selection(),{from:after.length,to:after.length});assert.equal(editor.view.state.doc.lines,4);
+      editor.view.dispatch({changes:{from:editor.view.state.selection.main.head,insert:'셋째'},selection:{anchor:editor.view.state.selection.main.head+2},userEvent:'input.type'});
+      assert.equal(editor.text(),after+'셋째');editor.mode(mode==='live'?'source':'live');assert.equal(editor.text(),after+'셋째');assert.equal(editor.selection().from,after.length+2);
+      for(let index=0;index<4&&editor.text()!==initial;index++)assert.equal(undo(editor.view),true);
+      assert.equal(editor.text(),initial);
+    }finally{editor.destroy();}
+  }
+});
+
+test('live container previews do not duplicate trailing blank lines owned by nested verbatim content',()=>{
+  for(const nested of ['  ```\n  code\n\n\n','  <pre>\n  code\n\n\n']){
+    const source='intro\n\n- item\n\n'+nested,editor=new DocumentEditor(root());
+    try{
+      editor.open({...snapshot,text:source,lineEnding:'LF'});editor.select({from:0,to:0});
+      assert.equal(editor.text(),source);assert.ok(editor.view.contentDOM.querySelector('.live-block pre'));
+      const blanks=[...editor.view.contentDOM.querySelectorAll('.cm-line')].filter(line=>!line.textContent?.trim());
+      assert.equal(blanks.length,2,'only the intro separator and terminal caret line are outside the verbatim preview');
+    }finally{editor.destroy();}
+  }
+});
+
+test('mac editing audit: Enter, Shift-Enter and list exit preserve Unicode CRLF through mode/history changes',()=>{
+  for(const mode of ['source','live'] as const){
+    const editor=new DocumentEditor(root());try{
+      const original='한😀';editor.open({...snapshot,text:original,lineEnding:'CRLF'});editor.mode(mode);editor.select({from:original.length,to:original.length});
+      for(const shiftKey of [false,true]){
+        const event=new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,shiftKey,bubbles:true,cancelable:true});editor.view.contentDOM.dispatchEvent(event);assert.equal(event.defaultPrevented,true);
+      }
+      assert.equal(editor.text(),'한😀\r\n\r\n');assert.deepEqual(editor.selection(),{from:7,to:7});editor.mode(mode==='live'?'source':'live');assert.equal(editor.text(),'한😀\r\n\r\n');
+      while(editor.text()!==original)assert.equal(undo(editor.view),true);assert.equal(editor.text(),original);
+      editor.open({...snapshot,documentId:'list-audit',text:'- 목록',lineEnding:'CRLF'});editor.select({from:4,to:4});
+      for(let i=0;i<3;i++)editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}));
+      assert.equal(editor.text(),'- 목록\r\n\r\n');assert.equal(editor.selection().from,8);
+    }finally{editor.destroy();}
+  }
+});
+
+test('mac editing audit: code Enter expands braces with configured indentation and remains undoable',()=>{
+  for(const mode of ['source','live'] as const){
+    const source='```js\r\nfunction 한글() {}\r\n```',editor=new DocumentEditor(root());try{
+      editor.configure({tabSize:4});editor.open({...snapshot,text:source,lineEnding:'CRLF'});editor.mode(mode);
+      const caret=source.indexOf('{')+1;editor.select({from:caret,to:caret});
+      editor.view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true,cancelable:true}));
+      assert.equal(editor.text(),'```js\r\nfunction 한글() {\r\n    \r\n}\r\n```');
+      assert.equal(editor.text().slice(editor.selection().from-4,editor.selection().from),'    ');
+      assert.equal(undo(editor.view),true);assert.equal(editor.text(),source);assert.deepEqual(editor.selection(),{from:caret,to:caret});
+    }finally{editor.destroy();}
+  }
+});
+
+for(const [label,nativeAction,expected] of [['Print…','print','print'],['Quick Open…','quickOpen','quick-open'],['Open…','open','open']] as const)test(`editor shortcut matches native ${label} command without editing source`,()=>{
+  const menus=readFileSync(new URL('../../Sources/Mori/Menus.swift',import.meta.url),'utf8');
+  const entry=menus.split('\n').find(line=>line.includes(`command("${label}", "${nativeAction}",`));assert.ok(entry,label);
+  const key=/key: "([^"]+)"/.exec(entry)![1],modifiers=/modifiers: \[([^\]]+)\]/.exec(entry)?.[1]??'.command';
+  const actions:string[]=[],editor=new DocumentEditor(root(),{onShortcut:action=>actions.push(action)}),mac=process.platform==='darwin';
+  try{
+    const source='한글\r\n😀';editor.open({...snapshot,text:source});editor.select({from:2,to:2});
+    const event=new KeyboardEvent('keydown',{key,code:'Key'+key.toUpperCase(),keyCode:key.toUpperCase().charCodeAt(0),metaKey:mac,ctrlKey:!mac,altKey:modifiers.includes('.option'),shiftKey:modifiers.includes('.shift'),bubbles:true,cancelable:true});
+    editor.view.contentDOM.dispatchEvent(event);
+    assert.deepEqual(actions,[expected]);assert.equal(event.defaultPrevented,true);assert.equal(editor.text(),source);assert.deepEqual(editor.selection(),{from:2,to:2});assert.equal(undo(editor.view),false);
+  }finally{editor.destroy();}
+});
+
+test('Quick Open shortcut accepts the Option-O keyboard layout character with its physical key code',()=>{
+  const actions:string[]=[],editor=new DocumentEditor(root(),{onShortcut:action=>actions.push(action)}),mac=process.platform==='darwin';
+  try{
+    editor.open(snapshot);const event=new KeyboardEvent('keydown',{key:'ø',code:'KeyO',keyCode:79,metaKey:mac,ctrlKey:!mac,altKey:true,bubbles:true,cancelable:true});
+    editor.view.contentDOM.dispatchEvent(event);assert.deepEqual(actions,['quick-open']);assert.equal(event.defaultPrevented,true);assert.equal(editor.text(),snapshot.text);
+  }finally{editor.destroy();}
+});

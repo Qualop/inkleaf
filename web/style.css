@@ -82,7 +82,6 @@ textarea { resize: vertical; }
 .live-heading-3 { font-size: 1.25em; }
 .live-block { cursor: text; margin: 0; padding: 0; font-size: var(--font-size); white-space: normal; }
 .live-block > :last-child { margin-bottom: 0; }
-.cm-editor[data-mode="live"] .cm-line:has(> br:only-child):not(.cm-activeLine) { line-height: .75; }
 .live-block:focus-visible { outline-offset: 4px; }
 .reading { height: 100%; overflow: auto; padding: 52px max(36px, calc((100% - var(--document-width)) / 2 + 36px)) 120px; font-size: var(--font-size); font-family: var(--document-font); line-height: var(--line-height); }
 .markdown-body { overflow-wrap: anywhere; color: var(--text); }

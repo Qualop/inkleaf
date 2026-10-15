@@ -15,10 +15,12 @@ final class SpellingService {
     }
     private static let maximumIssues = 200
     private static let maximumText = 50_000
+    private static let hangul = try! NSRegularExpression(pattern: "\\p{script=Hangul}")
 
     func check(text: String, language: String, ignoredWords: [String]) -> JSONValue {
         let checker = NSSpellChecker.shared, languages = checker.availableLanguages
         let requested = language.replacingOccurrences(of: "_", with: "-").lowercased()
+        let korean = requested.components(separatedBy: "-").first == "ko"
         let resolved = languages.first { $0.replacingOccurrences(of: "_", with: "-").lowercased() == requested }
             ?? languages.first { $0.replacingOccurrences(of: "_", with: "-").lowercased().components(separatedBy: "-").first == requested.components(separatedBy: "-").first }
         let original = text as NSString
@@ -26,7 +28,7 @@ final class SpellingService {
         if length > 0 && length < original.length && (0xD800...0xDBFF).contains(original.character(at: length - 1)) { length -= 1 }
         let mask = Self.proseText(original.substring(to: length)), source = mask as NSString
         let ignored = Set(ignoredWords.prefix(5000).map { $0.precomposedStringWithCanonicalMapping.lowercased() })
-        var issues = requested.components(separatedBy: "-").first == "ko" ? Self.koreanIssues(text: mask, ignoredWords: ignoredWords) : []
+        var issues = korean ? Self.koreanIssues(text: mask, ignoredWords: ignoredWords) : []
         var notes: [String] = []
         if let resolved {
             let tag = NSSpellChecker.uniqueSpellDocumentTag()
@@ -38,6 +40,8 @@ final class SpellingService {
                 guard range.location != NSNotFound, range.length > 0, range.location >= cursor, NSMaxRange(range) <= source.length else { break }
                 cursor = NSMaxRange(range); checked += 1
                 let word = source.substring(with: range)
+                // The Korean dictionary also flags valid Latin words; their dictionary pass owns those spans.
+                if !Self.dictionaryApplies(to: word, korean: korean) { continue }
                 if ignored.contains(word.precomposedStringWithCanonicalMapping.lowercased()) || word.utf16.count > 100 || issues.contains(where: { $0.from < cursor && $0.to > range.location }) { continue }
                 let guesses = checker.guesses(forWordRange: range, in: mask, language: resolved, inSpellDocumentWithTag: tag) ?? []
                 issues.append(Issue(from: range.location, to: cursor, kind: "spelling", message: "철자를 확인하세요.", suggestions: Self.suggestions(guesses)))
@@ -54,9 +58,11 @@ final class SpellingService {
                     guard relative.location != NSNotFound, relative.location >= 0, relative.location <= sentence.length,
                           relative.length > 0, relative.length <= sentence.length - relative.location else { continue }
                     let from = sentence.location + relative.location, to = from + relative.length
+                    let word = source.substring(with: NSRange(location: from, length: to - from))
                     guard to <= grammarCursor,
+                          Self.dictionaryApplies(to: word, korean: korean),
                           !issues.contains(where: { $0.from < to && $0.to > from }),
-                          !ignored.contains(source.substring(with: NSRange(location: from, length: to - from)).lowercased()) else { continue }
+                          !ignored.contains(word.lowercased()) else { continue }
                     let message = (detail[NSGrammarUserDescription] as? String) ?? "문법과 띄어쓰기를 확인하세요."
                     issues.append(Issue(from: from, to: to, kind: "grammar", message: String(message.prefix(500)), suggestions: Self.suggestions(detail[NSGrammarCorrections] as? [String] ?? [])))
                     if issues.count >= Self.maximumIssues { break }
@@ -69,6 +75,10 @@ final class SpellingService {
         var result: [String: JSONValue] = ["issues": .array(issues.sorted { $0.from == $1.from ? $0.to < $1.to : $0.from < $1.from }.prefix(Self.maximumIssues).map(\.json)), "languages": .array(languages.map(JSONValue.string)), "language": .string(resolved ?? language)]
         if !notes.isEmpty { result["note"] = .string(notes.joined(separator: " ")) }
         return .object(result)
+    }
+
+    private static func dictionaryApplies(to text: String, korean: Bool) -> Bool {
+        !korean || hangul.firstMatch(in: text, range: NSRange(location: 0, length: text.utf16.count)) != nil
     }
 
     func lookup(text: String, in view: WKWebView) async throws -> JSONValue {

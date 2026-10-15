@@ -4,7 +4,7 @@ import { builtInThemes, normalizeUserThemes, resolveDocumentTheme, scopeThemeCSS
 import type { DocumentTheme } from './themes.ts';
 import { organizeSettings } from './settings-layout.ts';
 import { annotatePreview, normalizeProofreadingResult, refreshProofreading, showProofreadingSuggestions } from './proofreading.ts';
-import type { ProofreadingResult } from './proofreading.ts';
+import type { ProofreadingIssue, ProofreadingResult } from './proofreading.ts';
 import { NativeClient, NativeError, normalizeSnapshot } from './bridge.ts';
 import type { NativeSnapshot } from './bridge.ts';
 import { DocumentEditor } from './editor.ts';
@@ -31,7 +31,7 @@ import { parser as markdownParser } from '@lezer/markdown';
 import { EditorView } from '@codemirror/view';
 
 interface MutationOrigin { documentId: string; path:string|null; revision: number; source: string; selection: {from:number;to:number} }
-interface DocumentRecord extends NativeSnapshot { savedRevision: number; saving: number }
+interface DocumentRecord extends NativeSnapshot { savedRevision: number; saving: number; savedContent?:{text:string;encoding:string} }
 interface ProductivityPreferences {autoSave:boolean;watchFiles:boolean;strictSyntax:boolean;emojiCompletion:boolean; boldMarker:'**'|'__';italicMarker:'*'|'_';bulletMarker:'-'|'+'|'*'; autoLinks:boolean;smartPunctuation:boolean;renderHTML:boolean; defaultCodeLanguage:string;lastCodeLanguage:string;rememberCodeLanguage:boolean; fileSort:'name'|'modified'|'size';pinnedFolders:string[]; customCSS:string; tabSize:number; pairing:boolean; spellcheck:boolean; richPaste:boolean }
 interface Preferences extends ProductivityPreferences { appIcon:'ink'|'leaf'; language:'en'|'ko'; restoreSession:boolean; restoreUnsaved:boolean; grammarCheck:boolean; spellLanguage:string; personalDictionary:string[]; documentTheme:string; documentOverrides:Record<string,DocumentOverrides>; theme: string; fontSize: number; fontFamily: string; documentWidth: number; lineHeight: number; wrap: boolean; lineNumbers: boolean; focus: boolean; typewriter: boolean; mode: 'source' | 'live' | 'reading'; pandocPath: string; imageUploaderPath:string; imageUploaderArguments:string; mathNumbering:'none'|'ams'|'all'; mathPhysics:boolean; session:SavedSession; recentFiles:string[]; recentFolders:string[]; exportPresets: Record<string, any> }
 const documentPreferenceKeys=['documentTheme','grammarCheck','spellLanguage','fontSize','fontFamily','documentWidth','lineHeight','wrap','lineNumbers','focus','typewriter','mode','tabSize','pairing','spellcheck','emojiCompletion','strictSyntax','boldMarker','italicMarker','bulletMarker','defaultCodeLanguage','lastCodeLanguage','rememberCodeLanguage','mathNumbering','mathPhysics','autoLinks','smartPunctuation','renderHTML','customCSS'] as const;
@@ -54,6 +54,10 @@ export class MoriApp {
   private lastOutlineSource='';
   private autoSaveTimers=new Map<string,ReturnType<typeof setTimeout>>();private autoSaveBlocked=new Set<string>();private externalWarnings=new Map<string,string>();private observerTimer:ReturnType<typeof setInterval>;private observing=false;
   private saveQueues=new Map<string,Promise<void>>();
+  private searchGeneration=0;
+  private searchSignature='';
+  private typewriterFrame?:number;
+  private typewriterGeneration=0;
   private disposed = false; private booting = true; private queuedCommands: EditorCommand[] = []; private checkpointTimers = new Map<string, ReturnType<typeof setTimeout>>(); private refreshTimer?: ReturnType<typeof setTimeout>; private nativePrevious: any; private nativeReceiver: any; private searchMatches: SearchMatch[] = []; private searchIndex = -1; private searchMode: 'document' | 'workspace' = 'document'; private searchJob = ''; private exportJob = ''; private recoveries: any[] = []; private knownFiles = new Map<string, any>(); private exportOptions: any = { paper: 'A4', margin: 20, width: 1024, quality: 0.9, outline: false, title: '', author: '', header: '', footer: '', splitPages: false, template:'',referenceDoc:'',css:'',extraArguments:[],tocDepth:3,postCommand:'',postArguments:[] }; private media: MediaQueryList; private mediaChange: () => void; private events = new AbortController(); private assetRoots = new Map<string, string>(); private unsavedAssetRoot?:string; private committedExportJobs=new Set<string>(); private lastExports=new Map<string,{format:string;options:Record<string,any>;destination:string}>(); private formatJobs=new Set<string>(); private preferenceWrites:Promise<unknown>=Promise.resolve(); private pendingAssetRewrites = new Map<string,{root:string;mapping:Map<string,string>;revision:number;path:string}>(); private toolJob = ''; private restoredIds = new Set<string>(); private toolOrigin?: MutationOrigin; private closePrevious:any;private closeReceiver:any;
   constructor(root: HTMLElement, client = new NativeClient()) {
     this.root = root; this.client = client; root.className = 'mori-app';
@@ -77,7 +81,7 @@ export class MoriApp {
     this.query<HTMLSelectElement>('[data-control="mode"]').addEventListener('change', event => this.setMode((event.target as HTMLSelectElement).value as Preferences['mode']));
     this.query<HTMLSelectElement>('[data-control="encoding"]').addEventListener('change',event=>void this.setEncoding((event.target as HTMLSelectElement).value).catch(error=>this.report(error)));
     this.query<HTMLSelectElement>('[data-control="line-ending"]').addEventListener('change', event => { const ending = (event.target as HTMLSelectElement).value as 'LF'|'CRLF'; this.editor.setLineEnding(ending); const doc = this.current(); if (doc) doc.lineEnding = ending; });
-    for (const name of ['find', 'caseSensitive', 'regex', 'wholeWord']) this.query(`[data-control="${name}"]`).addEventListener(name === 'find' ? 'input' : 'change', () => this.updateSearch());
+    for (const name of ['find', 'caseSensitive', 'regex', 'wholeWord']) this.query(`[data-control="${name}"]`).addEventListener(name === 'find' ? 'input' : 'change', () => {this.invalidateSearch();this.updateSearch();});
     this.query('[data-control="find"]').addEventListener('keydown', event => { if ((event as KeyboardEvent).key === 'Enter') { event.preventDefault(); if (this.searchMode === 'workspace') this.perform('workspace-search'); else this.nextMatch((event as KeyboardEvent).shiftKey ? -1 : 1); } });
     this.query<HTMLSelectElement>('[data-control="file-sort"]').addEventListener('change',event=>{this.preferences.fileSort=(event.target as HTMLSelectElement).value as Preferences['fileSort'];if(this.workspace)void this.loadDirectory(this.workspace,this.query('.file-tree')).catch(error=>this.report(error));void this.persist().catch(error=>this.report(error));});
     this.buildMenus();this.query('[data-menu="edit"] .menu-items').append(button('Check External Changes','check-files'));this.localizer=new UILocalizer(root); this.applyPreferences();
@@ -87,6 +91,22 @@ export class MoriApp {
   private ui(en:string,ko:string) { return this.preferences.language==='ko'?ko:en; }
   private closeChromePopovers() { for (const details of this.root.querySelectorAll<HTMLDetailsElement>('.chrome-popover[open],.chrome-popover .menu[open]')) details.open = false; }
   private current(): DocumentRecord | undefined { return this.documents.get(this.activeId); }
+  private isDirty(doc:DocumentRecord):boolean {
+    return doc.savedContent?doc.text!==doc.savedContent.text || doc.encoding!==doc.savedContent.encoding:doc.revision!==doc.savedRevision;
+  }
+  private historyAction(action:'undo'|'redo') {
+    const document=this.root.ownerDocument,focused=document.activeElement;
+    if(!(focused instanceof HTMLElement))return;
+    if(focused!==this.editor.view.contentDOM){
+      if(focused.closest('.cm-editor'))return;
+      const editable=focused.closest('[contenteditable]');
+      const ownsText=focused.matches('input,textarea') || focused.isContentEditable || !!editable && ['','true','plaintext-only'].includes((editable.getAttribute('contenteditable')??'false').toLowerCase());
+      if(ownsText){document.execCommand?.(action);return;}
+    }
+    if(focused.closest('dialog') || this.root.querySelector('dialog[open]'))return;
+    if(focused!==document.body && focused!==document.documentElement && !this.root.contains(focused))return;
+    (action==='undo'?undo:redo)(this.editor.view);
+  }
   private perform(action: string) { void this.action(action).catch(error => this.report(error)); }
   private performCommand(command: EditorCommand) { void this.runCommand(command).catch(error => this.report(error)); }
   private status(message: string, error = false) { if (this.disposed) return; this.query('[data-message]').textContent = message; const element = this.query('.message'); element.hidden = !message; element.classList.toggle('error', error); }
@@ -173,6 +193,7 @@ export class MoriApp {
     this.preferences=this.preferencesFor();if(this.current()===doc)this.applyPreferences();
   }
   private applyPreferences() {
+    this.cancelTypewriterFrame();
     for(const timer of this.autoSaveTimers.values())clearTimeout(timer);this.autoSaveTimers.clear();
     this.syncGlobalPreferences();this.preferences=this.preferencesFor();const preferences = this.preferences;this.localizer?.setLanguage(preferences.language);configureMarkdown(preferences);
     const documentTheme=resolveDocumentTheme(preferences.documentTheme,this.userThemes);this.root.dataset.documentTheme=documentTheme.id;this.root.dataset.theme=documentTheme.appearance??(preferences.theme === 'system' ? (this.media?.matches ? 'dark' : 'light') : preferences.theme);
@@ -185,7 +206,7 @@ export class MoriApp {
     this.query('[data-action="focus"]').setAttribute('aria-pressed', String(preferences.focus)); this.query('[data-action="typewriter"]').setAttribute('aria-pressed', String(preferences.typewriter));
     this.editor?.configure({ wrap: preferences.wrap, lineNumbers: preferences.lineNumbers,tabSize:preferences.tabSize,pairing:preferences.pairing,spellcheck:preferences.spellcheck,strictSyntax:preferences.strictSyntax,emojiCompletion:preferences.emojiCompletion,boldMarker:preferences.boldMarker,italicMarker:preferences.italicMarker,bulletMarker:preferences.bulletMarker });
     let css=this.root.querySelector<HTMLStyleElement>('[data-user-css]');if(!css){css=document.createElement('style');css.dataset.userCss='true';this.root.append(css);}css.textContent=preferences.customCSS; this.setMode(preferences.mode, false);
-    if(this.editor){refreshProofreading(this.editor.view);if(this.current())this.renderSaveState();}
+    if(this.editor){refreshProofreading(this.editor.view);this.annotateProofreading();if(this.current())this.renderSaveState();}
     for(const doc of this.documents.values())this.queueAutoSave(doc);
   }
   private persist(reset=false):Promise<unknown> {
@@ -193,25 +214,32 @@ export class MoriApp {
   }
   private captureSession() {
     if(this.booting)return;
-    const meaningful=[...this.documents.values()].filter(doc=>doc.path||doc.text||doc.revision!==doc.savedRevision),views=Object.fromEntries(meaningful.flatMap(doc=>{const state=this.editor.captureView(doc.documentId);return state?[[doc.documentId,state]]:[];}));this.preferences.session=normalizeSession({paths:meaningful.flatMap(doc=>doc.path?[doc.path]:[]),activePath:this.current()?.path ?? null,activeDocumentId:this.activeId,workspace:this.workspace,documents:meaningful.map(doc=>({documentId:doc.documentId,path:doc.path})),draftRevisions:Object.fromEntries([...this.draftRevisions].filter(([id])=>meaningful.some(doc=>doc.documentId===id))),views});
+    const meaningful=[...this.documents.values()].filter(doc=>doc.path||doc.text||this.isDirty(doc)),views=Object.fromEntries(meaningful.flatMap(doc=>{const state=this.editor.captureView(doc.documentId);return state?[[doc.documentId,state]]:[];}));this.preferences.session=normalizeSession({paths:meaningful.flatMap(doc=>doc.path?[doc.path]:[]),activePath:this.current()?.path ?? null,activeDocumentId:this.activeId,workspace:this.workspace,documents:meaningful.map(doc=>({documentId:doc.documentId,path:doc.path})),draftRevisions:Object.fromEntries([...this.draftRevisions].filter(([id])=>meaningful.some(doc=>doc.documentId===id))),views});
   }
   private sessionChanged() {this.captureSession();if(!this.booting)void this.persist().catch(error=>this.report(error));}
   setMode(mode: Preferences['mode'], persist = true) {
+    if(mode!==this.editor.view.dom.dataset.mode){this.invalidateSearch();this.cancelTypewriterFrame();}
     if(persist)this.setPreference('mode',mode,this.hasDocumentPreferences(),this.current(),false);else this.preferences.mode=mode; this.editor.mode(mode); this.query<HTMLSelectElement>('[data-control="mode"]').value = mode; this.query('.editor-host').hidden = mode === 'reading'; this.query('.reading').hidden = mode !== 'reading';
     this.query('[data-action="source"]').setAttribute('aria-pressed', String(mode === 'source'));
     if (mode === 'reading') this.renderReading(); if (persist) void this.persist().catch(error => this.report(error));
   }
   private renderReading() { const element = this.query('.reading'); element.innerHTML = renderMarkdown(this.editor.text());this.annotateProofreading(element); void this.preview(element).catch(error => this.report(error)); }
   private adopt(snapshot: NativeSnapshot, restored = false) {
+    if(snapshot.documentId!==this.activeId)this.invalidateSearch();
     if(restored){this.restoredIds.add(snapshot.documentId);this.draftRevisions.set(snapshot.documentId,snapshot.revision);}
     if(!this.documents.has(snapshot.documentId))this.invalidateCloseApproval();
     if((restored || this.restoredIds.has(snapshot.documentId)) && !snapshot.path && this.unsavedAssetRoot)this.assetRoots.set(snapshot.documentId,this.unsavedAssetRoot);
-    if (!this.documents.has(snapshot.documentId)) this.documents.set(snapshot.documentId, { ...snapshot, savedRevision: restored || this.restoredIds.has(snapshot.documentId) ? -1 : snapshot.savedDigest || snapshot.path || !snapshot.text ? snapshot.revision : -1, saving: 0 });
+    if (!this.documents.has(snapshot.documentId)) {
+      const savedRevision=restored || this.restoredIds.has(snapshot.documentId)?-1:snapshot.savedDigest || snapshot.path || !snapshot.text?snapshot.revision:-1;
+      this.documents.set(snapshot.documentId,{...snapshot,savedRevision,saving:0,...(savedRevision>=0?{savedContent:{text:snapshot.text,encoding:snapshot.encoding}}:{})});
+    }
     this.syncGlobalPreferences();this.activeId = snapshot.documentId;this.preferences=this.preferencesFor(); this.editor.open(this.documents.get(this.activeId)!); this.applyPendingAssets(this.documents.get(this.activeId)!);this.applyPreferences(); this.invalidateToolReplacement(); this.refresh(); if(snapshot.path)this.preferences.recentFiles=recordRecent(this.preferences.recentFiles,snapshot.path);this.sessionChanged();
   }
   private changed(id: string, text: string) {
     const doc = this.documents.get(id); if (!doc) return; doc.text = text; doc.revision++; this.invalidateToolReplacement();
+    if(id===this.activeId)this.invalidateSearch();
     doc.lineEnding=this.editor.lineEnding();
+    if(!this.isDirty(doc))this.draftRevisions.delete(doc.documentId);
     this.invalidateCloseApproval();
     this.renderTabs(); this.renderSaveState();this.queueCheckpoint(doc);
     if (this.refreshTimer) clearTimeout(this.refreshTimer); this.refreshTimer = setTimeout(() => { if (!this.disposed) this.refreshContent(); }, 100);
@@ -219,15 +247,15 @@ export class MoriApp {
   private queueCheckpoint(doc:DocumentRecord) {
     this.queueAutoSave(doc);
     this.clearCheckpoint(doc.documentId);this.checkpointTimers.set(doc.documentId,setTimeout(()=>{
-      this.checkpointTimers.delete(doc.documentId);if(!this.disposed && this.documents.get(doc.documentId)===doc){const revision=doc.revision;void this.client.call('checkpoint',{documentId:doc.documentId,text:this.publishedSource(doc),revision,force:false}).then(()=>{if(!this.disposed&&this.documents.get(doc.documentId)===doc&&doc.revision!==doc.savedRevision){this.draftRevisions.set(doc.documentId,revision);this.renderSaveState();this.sessionChanged();}}).catch(error=>this.report(error));}
+      this.checkpointTimers.delete(doc.documentId);if(!this.disposed && this.documents.get(doc.documentId)===doc){const revision=doc.revision;void this.client.call('checkpoint',{documentId:doc.documentId,text:this.publishedSource(doc),revision,force:false}).then(()=>{if(!this.disposed&&this.documents.get(doc.documentId)===doc){if(this.isDirty(doc))this.draftRevisions.set(doc.documentId,revision);else this.draftRevisions.delete(doc.documentId);this.renderSaveState();this.sessionChanged();}}).catch(error=>this.report(error));}
     },700));
   }
   private queueAutoSave(doc:DocumentRecord){
     const previous=this.autoSaveTimers.get(doc.documentId);if(previous)clearTimeout(previous);this.autoSaveTimers.delete(doc.documentId);
-    if(this.disposed||this.booting||!this.preferences.autoSave||!doc.path||doc.revision===doc.savedRevision||this.autoSaveBlocked.has(doc.documentId)||this.restoredIds.has(doc.documentId)||this.pendingAssetRewrites.has(doc.documentId))return;
+    if(this.disposed||this.booting||!this.preferences.autoSave||!doc.path||!this.isDirty(doc)||this.autoSaveBlocked.has(doc.documentId)||this.restoredIds.has(doc.documentId)||this.pendingAssetRewrites.has(doc.documentId))return;
     this.autoSaveTimers.set(doc.documentId,setTimeout(()=>{
       this.autoSaveTimers.delete(doc.documentId);
-      if(this.disposed||!this.preferences.autoSave||this.documents.get(doc.documentId)!==doc||doc.revision===doc.savedRevision||this.autoSaveBlocked.has(doc.documentId))return;
+      if(this.disposed||!this.preferences.autoSave||this.documents.get(doc.documentId)!==doc||!this.isDirty(doc)||this.autoSaveBlocked.has(doc.documentId))return;
       if(doc.saving||this.formatJobs.has(doc.documentId)||(this.activeId===doc.documentId&&this.editor.view.compositionStarted)){this.queueAutoSave(doc);return;}
       void this.saveRecord(doc,false,false,true).catch(error=>this.report(error));
     },1000));
@@ -243,7 +271,7 @@ export class MoriApp {
         if(!observed||!['unchanged','modified','missing'].includes(observed.status))throw new Error('The native file observer returned an invalid result.');
         if(observed.status==='unchanged'&&observed.diskDigest===digest){this.externalWarnings.delete(doc.documentId);continue;}
         const warning=observed.status+':'+observed.diskDigest;
-        if(observed.status!=='missing'&&doc.revision===doc.savedRevision&&this.activeId===doc.documentId&&!this.editor.view.compositionStarted&&!this.root.querySelector('dialog')){
+        if(observed.status!=='missing'&&!this.isDirty(doc)&&this.activeId===doc.documentId&&!this.editor.view.compositionStarted&&!this.root.querySelector('dialog')){
           if(await this.reloadDocument(doc,true))this.status(`Reloaded external changes in ${basename(path)}.`);continue;
         }
         this.autoSaveBlocked.add(doc.documentId);
@@ -255,20 +283,35 @@ export class MoriApp {
     const origin=this.mutationOrigin(),doc=this.current()!;
     if(!['utf8','utf8bom','utf16le','utf16be'].includes(encoding))throw new Error('Unsupported document encoding.');
     if(encoding===doc.encoding)return;if(this.formatJobs.has(doc.documentId))throw new Error('Document format is already changing.');
-    this.formatJobs.add(doc.documentId);this.clearCheckpoint(doc.documentId);this.refresh();
+    this.formatJobs.add(doc.documentId);this.invalidateCloseApproval();this.clearCheckpoint(doc.documentId);this.refresh();
     try {
       const revision=origin.revision+1,snapshot=normalizeSnapshot(await this.client.call('setDocumentFormat',{documentId:origin.documentId,text:origin.source,revision,encoding}));
       if(snapshot.documentId!==origin.documentId || snapshot.revision!==revision || snapshot.encoding!==encoding || snapshot.text!==origin.source)throw new Error('Native format response does not match the original document request.');
       if(this.documents.get(origin.documentId)!==doc)throw new Error('The original document closed while its format changed.');
       doc.encoding=encoding;doc.revision=doc.revision===origin.revision?revision:Math.max(doc.revision+1,revision);this.invalidateCloseApproval();
       this.queueCheckpoint(doc);this.status(`Encoding changed to ${encoding.toUpperCase()} for ${doc.path?basename(doc.path):'Untitled'}. Save to write the new byte format.`);
-    } catch(error){if(this.documents.get(doc.documentId)===doc && doc.revision!==doc.savedRevision)this.queueCheckpoint(doc);throw error;}
+    } catch(error){if(this.documents.get(doc.documentId)===doc && this.isDirty(doc))this.queueCheckpoint(doc);throw error;}
     finally {this.formatJobs.delete(doc.documentId);if(!this.disposed)this.refresh();}
   }
-  private selectionChanged() {
+  private cancelTypewriterFrame() {
+    ++this.typewriterGeneration;
+    if(this.typewriterFrame!==undefined)cancelAnimationFrame(this.typewriterFrame);
+    this.typewriterFrame=undefined;
+  }
+  private selectionChanged(center=true) {
     if (!this.editor) return; this.invalidateToolReplacement(); const selection = this.editor.selection(); this.query('[data-selection]').textContent = selection.to > selection.from ? `${Array.from(this.editor.text().slice(selection.from, selection.to)).length} selected` : '';
     this.outlineNavigator?.update(this.lastOutlineSource,selection);
-    if (this.preferences.typewriter) requestAnimationFrame(() => { if (!this.disposed) this.editor.view.dispatch({ effects: EditorView.scrollIntoView(this.editor.view.state.selection.main.head, { y: 'center' }) }); });
+    if(!center)return;
+    this.cancelTypewriterFrame();
+    if(!this.preferences.typewriter || this.preferences.mode==='reading' || !this.current())return;
+    const generation=this.typewriterGeneration,documentId=this.activeId,source=this.editor.view.state.doc,mode=this.preferences.mode,caret=this.editor.view.state.selection.main;
+    this.typewriterFrame=requestAnimationFrame(()=>{
+      if(generation!==this.typewriterGeneration)return;
+      this.typewriterFrame=undefined;
+      const current=this.editor.view.state.selection.main;
+      if(this.disposed || !this.preferences.typewriter || this.preferences.mode!==mode || this.activeId!==documentId || this.editor.view.state.doc!==source || current.anchor!==caret.anchor || current.head!==caret.head)return;
+      this.editor.view.dispatch({effects:EditorView.scrollIntoView(caret.head,{y:'center'})});
+    });
   }
   private mutationOrigin(): MutationOrigin {
     const doc = this.current(); if (!doc) throw new Error('Open a document first.');
@@ -286,10 +329,10 @@ export class MoriApp {
   private clearCheckpoint(id:string) { const timer=this.checkpointTimers.get(id); if(timer)clearTimeout(timer);this.checkpointTimers.delete(id); }
   private renderTabs() {
     const element = this.query('.document-tabs'); element.replaceChildren();
-    for (const doc of this.documents.values()) { const row = document.createElement('div'); row.className = 'document-tab'; row.dataset.document = doc.documentId; row.dataset.dirty = String(doc.revision !== doc.savedRevision); const tab = button(doc.path ? basename(doc.path) : this.ui('Untitled','새 문서')); tab.setAttribute('role','tab'); tab.setAttribute('aria-selected',String(doc.documentId === this.activeId)); tab.title = doc.path ?? 'Unsaved document'; tab.addEventListener('click',() => this.adopt(doc)); const close = button('×'); close.className = 'close-tab'; close.setAttribute('aria-label',`Close ${tab.textContent}`); close.addEventListener('click',() => void this.closeDocument(doc).catch(error => this.report(error))); row.append(tab,close); element.append(row); }
+    for (const doc of this.documents.values()) { const row = document.createElement('div'); row.className = 'document-tab'; row.dataset.document = doc.documentId; row.dataset.dirty = String(this.isDirty(doc)); const tab = button(doc.path ? basename(doc.path) : this.ui('Untitled','새 문서')); tab.setAttribute('role','tab'); tab.setAttribute('aria-selected',String(doc.documentId === this.activeId)); tab.title = doc.path ?? 'Unsaved document'; tab.addEventListener('click',() => this.adopt(doc)); const close = button('×'); close.className = 'close-tab'; close.setAttribute('aria-label',`Close ${tab.textContent}`); close.addEventListener('click',() => void this.closeDocument(doc).catch(error => this.report(error))); row.append(tab,close); element.append(row); }
   }
   private renderSaveState() {
-    const doc=this.current(),kept=doc && this.draftRevisions.get(doc.documentId)===doc.revision,dirty=doc && doc.revision!==doc.savedRevision;
+    const doc=this.current(),kept=doc && this.draftRevisions.get(doc.documentId)===doc.revision,dirty=doc && this.isDirty(doc);
     this.query('[data-save-state]').textContent=!doc?this.ui('No document open','열린 문서 없음'):doc.saving?this.ui('Saving…','파일 저장 중…'):!doc.path?kept?this.ui('Draft kept','임시 보관됨'):this.ui('Draft','임시 문서'):dirty?this.ui('Unsaved file changes','파일 저장 전')+(kept?this.ui(' · Draft kept',' · 임시 보관됨'):''):this.ui('Saved to file','파일에 저장됨');
     const indicator=this.query('[data-save-indicator]');indicator.textContent=doc?.saving?this.ui('Saving…','파일 저장 중…'):doc?.path?this.ui('Unsaved file changes','파일 저장 전'):kept?this.ui('Draft kept','임시 보관됨'):this.ui('Draft changes','임시 보관 중');indicator.hidden=!doc||(!doc.saving && (!doc.path?!doc.text:!dirty));
     const title=doc?.path?basename(doc.path):this.ui('Untitled','새 문서'),state={title,path:doc?.path??null,edited:!!dirty,appearance:this.root.dataset.theme},key=JSON.stringify(state);document.title=`${title} · Inkleaf`;
@@ -301,7 +344,7 @@ export class MoriApp {
     const text = this.editor.text(), stats = getStatistics(text); this.query('[data-statistics]').textContent = `${stats.words.toLocaleString()} words · ${stats.characters.toLocaleString()} characters · ${stats.lines.toLocaleString()} lines · ${stats.readingMinutes} min`;
     this.query('[data-word-count]').textContent = this.preferences.language === 'ko' ? `${stats.words.toLocaleString()} 단어` : `${stats.words.toLocaleString()} words`;
     this.lastOutlineSource=text;this.outlineNavigator.update(text,this.editor.selection());
-    if (this.preferences.mode === 'reading') this.renderReading(); if (this.searchMode === 'document') this.updateSearch(); this.selectionChanged();
+    if (this.preferences.mode === 'reading') this.renderReading(); if (this.searchMode === 'document') this.updateSearch(); this.selectionChanged(false);
   }
   private assetSaveArguments(doc:DocumentRecord, source=doc.text) {
     const root=this.assetRoots.get(doc.documentId) ?? (doc.path ? parentPath(doc.path) : undefined);
@@ -336,11 +379,12 @@ export class MoriApp {
     if(this.documents.get(doc.documentId)!==doc)throw new Error('The original document is no longer open.');
     if(automatic&&(!this.preferences.autoSave||this.autoSaveBlocked.has(doc.documentId)))return;
     const timer=this.autoSaveTimers.get(doc.documentId);if(timer)clearTimeout(timer);this.autoSaveTimers.delete(doc.documentId);
-    const previousPreferenceKey=this.preferenceKey(doc),saveAs=as || !doc.path, request={documentId:doc.documentId,text:doc.text,revision:doc.revision,force,...(saveAs ? this.assetSaveArguments(doc) : {expectedDigest:doc.savedDigest})};
+    const previousPreferenceKey=this.preferenceKey(doc),encoding=doc.encoding,saveAs=as || !doc.path, request={documentId:doc.documentId,text:doc.text,revision:doc.revision,force,...(saveAs ? this.assetSaveArguments(doc) : {expectedDigest:doc.savedDigest})};
     doc.saving++;this.renderSaveState();
     try {
       const result:any=await this.client.call(saveAs?'saveAs':'saveDocument',request);
       if(result && Number.isInteger(result.revision) && result.revision>=doc.savedRevision) {
+        doc.savedContent={text:typeof result.text==='string'?result.text:request.text,encoding:typeof result.encoding==='string'?result.encoding:encoding};
         this.autoSaveBlocked.delete(doc.documentId);this.externalWarnings.delete(doc.documentId);
         if(doc.revision===request.revision)this.clearCheckpoint(doc.documentId);doc.savedRevision=result.revision;doc.savedDigest=result.savedDigest ?? doc.savedDigest;doc.path=result.path ?? doc.path;this.moveDocumentPreferences(doc,previousPreferenceKey);this.restoredIds.delete(doc.documentId);
         if(saveAs && typeof result.text==='string' && result.text!==request.text && doc.path) {
@@ -350,8 +394,8 @@ export class MoriApp {
           if(this.activeId===doc.documentId)this.applyPendingAssets(doc);else {doc.savedRevision=-1;this.assetRoots.set(doc.documentId,root);}
         } else if(saveAs && doc.path)this.assetRoots.delete(doc.documentId);
       }
-      if(doc.revision===doc.savedRevision)this.draftRevisions.delete(doc.documentId);if(doc.path)this.preferences.recentFiles=recordRecent(this.preferences.recentFiles,doc.path);await this.persist();
-      if(!automatic||this.activeId===doc.documentId)this.status(doc.revision===doc.savedRevision?'':'An earlier revision was saved. Current changes are still unsaved.');
+      if(!this.isDirty(doc))this.draftRevisions.delete(doc.documentId);if(doc.path)this.preferences.recentFiles=recordRecent(this.preferences.recentFiles,doc.path);await this.persist();
+      if(!automatic||this.activeId===doc.documentId)this.status(!this.isDirty(doc)?'':'An earlier revision was saved. Current changes are still unsaved.');
     } catch(error) {
       if(automatic){this.autoSaveBlocked.add(doc.documentId);this.status(`Auto-save paused for ${basename(doc.path??'document')}: ${error instanceof Error?error.message:String(error)}. Use Save to resolve it.`,true);}
       else if(error instanceof NativeError && error.code.toLowerCase().includes('conflict'))this.conflict(doc,saveAs);else throw error;
@@ -373,14 +417,19 @@ export class MoriApp {
     if(this.documents.get(doc.documentId)!==doc)throw new Error('The original document is no longer open.');
     this.adopt(doc);const origin=this.mutationOrigin();this.clearCheckpoint(doc.documentId);
     const snapshot=normalizeSnapshot(await this.client.call('reloadDocument',{documentId:doc.documentId,revision:doc.revision+1}));
-    if(automatic&&(!this.originCurrent(origin,false)||doc.revision!==doc.savedRevision||doc.saving||this.formatJobs.has(doc.documentId)||this.root.querySelector('dialog')))return false;
+    if(automatic&&(!this.originCurrent(origin,false)||this.isDirty(doc)||doc.saving||this.formatJobs.has(doc.documentId)||this.root.querySelector('dialog')))return false;
     if(this.editor.view.compositionStarted){if(automatic)return false;throw new Error('Finish composing text before reloading this document.');}
     if(!this.originCurrent(origin,false))throw new Error('The document changed while the disk version was loading; your open edits were kept.');if(snapshot.documentId!==doc.documentId)throw new Error('Reload returned a different document identity.');
-    this.editor.replace(snapshot.text,this.editor.selection(),snapshot.lineEnding);Object.assign(doc,snapshot,{savedRevision:snapshot.revision});this.clearCheckpoint(doc.documentId);this.restoredIds.delete(doc.documentId);this.assetRoots.delete(doc.documentId);this.autoSaveBlocked.delete(doc.documentId);this.externalWarnings.delete(doc.documentId);this.refresh();
+    this.editor.replace(snapshot.text,this.editor.selection(),snapshot.lineEnding);Object.assign(doc,snapshot,{savedRevision:snapshot.revision,savedContent:{text:snapshot.text,encoding:snapshot.encoding}});this.clearCheckpoint(doc.documentId);this.restoredIds.delete(doc.documentId);this.assetRoots.delete(doc.documentId);this.autoSaveBlocked.delete(doc.documentId);this.externalWarnings.delete(doc.documentId);this.refresh();
     return true;
   }
   private async closeDocument(doc:DocumentRecord,createWhenEmpty=true):Promise<boolean> {
-    if(doc.revision===doc.savedRevision){await this.removeDocument(doc,{},createWhenEmpty);return true;}
+    if(doc.saving)await this.saveQueues.get(doc.documentId);
+    if(!this.isDirty(doc)){
+      const revision=doc.revision;
+      if(revision!==doc.savedRevision)await this.client.call('checkpoint',{documentId:doc.documentId,text:this.publishedSource(doc),revision});
+      if(doc.revision===revision&&!this.isDirty(doc)){await this.removeDocument(doc,{},createWhenEmpty);return true;}
+    }
     return await new Promise<boolean>(resolve=>{
       const dialog=modal(this.root,'Close unsaved document?'),message=document.createElement('p');message.textContent=this.ui('Save to a file, keep a local draft, or discard the current changes.','파일에 저장하거나 임시 문서로 보관할 수 있습니다. 내용을 버리면 현재 변경 사항을 삭제합니다.');dialog.body.append(message);
       let settled=false;const finish=(accepted:boolean)=>{if(settled)return;settled=true;resolve(accepted);dialog.close();};
@@ -388,7 +437,7 @@ export class MoriApp {
       const operate=(fn:()=>Promise<boolean>)=>{for(const control of [keep,save,discard])control.disabled=true;void fn().then(accepted=>{if(accepted)finish(true);else for(const control of [keep,save,discard])control.disabled=false;}).catch(error=>{for(const control of [keep,save,discard])control.disabled=false;this.report(error);});};
       cancel.addEventListener('click',()=>finish(false));
       keep.addEventListener('click',()=>operate(async()=>{await this.client.call('checkpoint',{documentId:doc.documentId,text:this.publishedSource(doc),revision:doc.revision});await this.removeDocument(doc,{keepRecovery:true,revision:doc.revision},createWhenEmpty);return true;}));
-      save.addEventListener('click',()=>operate(async()=>{this.adopt(doc);await this.saveRecord(doc);if(doc.revision!==doc.savedRevision)return false;await this.removeDocument(doc,{},createWhenEmpty);return true;}));
+      save.addEventListener('click',()=>operate(async()=>{this.adopt(doc);await this.saveRecord(doc);if(this.isDirty(doc))return false;await this.removeDocument(doc,{},createWhenEmpty);return true;}));
       discard.addEventListener('click',()=>operate(async()=>{await this.removeDocument(doc,{discardRecovery:true},createWhenEmpty);return true;}));dialog.footer.append(cancel,keep,discard,save);
       dialog.element.addEventListener('mori-dismiss',()=>finish(false));
     });
@@ -404,13 +453,28 @@ export class MoriApp {
 
   private showPanel(name: 'files'|'outline'|'search') { this.query('.sidebar').hidden = false; this.query('[data-action="sidebar"]').setAttribute('aria-expanded','true'); for (const panel of this.root.querySelectorAll<HTMLElement>('[data-panel]')) panel.hidden = panel.dataset.panel !== name; for (const control of this.root.querySelectorAll<HTMLElement>('.sidebar-tabs button')) control.setAttribute('aria-pressed',String(control.dataset.action === (name === 'search' ? 'find' : name))); }
   private searchOptions(): SearchOptions { return Object.fromEntries(['caseSensitive','regex','wholeWord'].map(name => [name,this.query<HTMLInputElement>(`[data-control="${name}"]`).checked])); }
+  private searchContext() {
+    return JSON.stringify({documentId:this.activeId,source:this.editor.text(),query:this.query<HTMLInputElement>('[data-control="find"]').value,options:this.searchOptions(),mode:this.searchMode,editorMode:this.preferences.mode,workspace:this.workspace});
+  }
+  private invalidateSearch() {
+    ++this.searchGeneration;this.searchSignature='';this.searchMatches=[];this.searchIndex=-1;
+    this.query('[data-search-results]').replaceChildren();
+    for(const name of ['replace-one','replace-all','next-match','previous-match'])this.query<HTMLButtonElement>(`[data-action="${name}"]`).disabled=true;
+    const jobId=this.searchJob;this.searchJob='';
+    if(jobId)void this.client.call('cancelSearch',{jobId}).catch(()=>{});
+    if(this.searchMode==='workspace')this.query('[data-search-status]').textContent=this.ui('Search changed. Choose Search Folder to search again.','검색 조건이 바뀌었습니다. 폴더 검색을 다시 실행하세요.');
+    this.query('[data-action="cancel-job"]').hidden=!(this.exportJob || this.toolJob || this.searchJob);
+  }
   private updateSearch() {
     if (this.searchMode === 'workspace') return; const query = this.query<HTMLInputElement>('[data-control="find"]').value;
+    const signature=this.searchContext();if(signature!==this.searchSignature){this.searchIndex=-1;this.searchSignature=signature;}
     try { this.searchMatches = query ? findMatches(this.editor.text(),query,this.searchOptions()) : []; this.searchIndex = Math.min(this.searchIndex,this.searchMatches.length - 1); this.query('[data-search-status]').textContent = query ? `${this.searchMatches.length} ${this.searchMatches.length === 1 ? 'match' : 'matches'} in this document.` : 'Enter text to search this document.'; this.query('[data-search-results]').replaceChildren(); for (const name of ['replace-one','replace-all','next-match','previous-match']) this.query<HTMLButtonElement>(`[data-action="${name}"]`).disabled = !this.searchMatches.length; }
     catch (error) { this.searchMatches = []; this.query('[data-search-status]').textContent = `Invalid regular expression: ${error instanceof Error ? error.message : error}`; for (const name of ['replace-one','replace-all','next-match','previous-match']) this.query<HTMLButtonElement>(`[data-action="${name}"]`).disabled = true; }
   }
-  private nextMatch(direction: number) { if (!this.searchMatches.length) return; this.searchIndex = (this.searchIndex + direction + this.searchMatches.length) % this.searchMatches.length; this.editor.select(this.searchMatches[this.searchIndex]); this.query('[data-search-status]').textContent = `Match ${this.searchIndex + 1} of ${this.searchMatches.length}.`; }
+  private nextMatch(direction: number) { if(this.searchMode!=='document')return;this.updateSearch();if (!this.searchMatches.length) return; this.searchIndex = this.searchIndex<0?(direction<0?this.searchMatches.length-1:0):(this.searchIndex + direction + this.searchMatches.length) % this.searchMatches.length; this.editor.select(this.searchMatches[this.searchIndex]); this.query('[data-search-status]').textContent = `Match ${this.searchIndex + 1} of ${this.searchMatches.length}.`; }
   private replaceSearch(all: boolean) {
+    if(this.searchMode!=='document')return;
+    this.updateSearch();
     const query = this.query<HTMLInputElement>('[data-control="find"]').value, replacement = this.query<HTMLInputElement>('[data-control="replacement"]').value, options = this.searchOptions(); if (!query || !this.searchMatches.length) return;
     let text = this.editor.text(); if (all) text = replaceMatches(text,query,replacement,options); else { const match = this.searchMatches[Math.max(0,this.searchIndex)]; if (options.regex) text = replaceMatches(text,`(?<=^${escapePattern(text.slice(0,match.from))})(?:${query})`,replacement,{...options,wholeWord:false}); else text = text.slice(0,match.from) + replacement + text.slice(match.to); }
     this.editor.replace(text); this.updateSearch();
@@ -425,6 +489,7 @@ export class MoriApp {
     }
   }
   private async openWorkspace(path:string, reveal=true) {
+    this.invalidateSearch();
     this.workspace=path;this.knownFiles.clear();if(reveal)this.showPanel('files');this.query('[data-folder-label]').textContent=path;
     await this.loadDirectory(path,this.query('.file-tree'));this.refreshFileControls();this.preferences.recentFolders=recordRecent(this.preferences.recentFolders,path);this.sessionChanged();
   }
@@ -432,14 +497,25 @@ export class MoriApp {
   private async chooseFolder() { const result:any=await this.client.call('chooseWorkspace');const path=typeof result==='string'?result:result?.path;if(path)await this.openWorkspace(path); }
 
   private async workspaceSearch() {
-    if (!this.workspace) { await this.chooseFolder(); if (!this.workspace) return; } this.searchMode = 'workspace'; this.showPanel('search'); const query = this.query<HTMLInputElement>('[data-control="find"]').value; if (!query) { this.query('[data-search-status]').textContent = 'Enter text, then choose Search Folder.'; this.query('[data-control="find"]').focus(); return; }
-    const options = this.searchOptions(); const jobId = `search-${Date.now()}`; this.searchJob = jobId; this.query('[data-search-status]').textContent = 'Searching folder…'; this.query('[data-action="cancel-job"]').hidden = false;
-    try { const response: any = await this.client.call('searchWorkspace',{path:this.workspace,query,caseSensitive:!!options.caseSensitive,regex:!!options.regex,wholeWord:!!options.wholeWord,limit:200,jobId}); if (this.searchJob !== jobId) return; const matches = Array.isArray(response) ? response : response?.matches ?? []; const results = this.query('[data-search-results]'); results.replaceChildren(); this.query('[data-search-status]').textContent = `${matches.length} folder matches${matches.length >= 200 ? ' (limit reached)' : ''}.`; for (const match of matches) { const control = button(`${basename(match.path)}:${match.line} ${match.text.trim()}`); control.title = match.path; control.addEventListener('click',() => void this.openPath(match.path).then(() => { const lines = sourceLines(this.editor.text()), line = lines[Math.max(0,match.line - 1)]; if (line) this.editor.select({from:line.from + (match.from ?? 0),to:line.from + (match.to ?? 0)}); }).catch(error => this.report(error))); results.append(control); } }
+    if (!this.workspace) { await this.chooseFolder(); if (!this.workspace) return; }
+    this.invalidateSearch();this.searchMode = 'workspace'; this.showPanel('search'); const query = this.query<HTMLInputElement>('[data-control="find"]').value; if (!query) { this.query('[data-search-status]').textContent = 'Enter text, then choose Search Folder.'; this.query('[data-control="find"]').focus(); return; }
+    const options = this.searchOptions(),workspace=this.workspace,generation=this.searchGeneration,context=this.searchContext();const jobId = `search-${Date.now()}-${generation}`; this.searchJob = jobId; this.query('[data-search-status]').textContent = 'Searching folder…'; this.query('[data-action="cancel-job"]').hidden = false;
+    const current=()=>!this.disposed && generation===this.searchGeneration && this.searchMode==='workspace' && this.searchContext()===context;
+    try { const response: any = await this.client.call('searchWorkspace',{path:workspace,query,caseSensitive:!!options.caseSensitive,regex:!!options.regex,wholeWord:!!options.wholeWord,limit:200,jobId}); if (!current() || this.searchJob !== jobId) return; const matches = Array.isArray(response) ? response : response?.matches ?? []; const results = this.query('[data-search-results]'); results.replaceChildren(); this.query('[data-search-status]').textContent = `${matches.length} folder matches${matches.length >= 200 ? ' (limit reached)' : ''}.`; for (const match of matches) { const control = button(`${basename(match.path)}:${match.line} ${match.text.trim()}`); control.title = match.path; control.addEventListener('click',() => {if(!current())return;void (async()=>{
+        const opened=[...this.documents.values()].find(doc=>doc.path===match.path);
+        const snapshot=opened??normalizeSnapshot(await this.client.call('openDocument',{path:match.path}));
+        if(!current())return;
+        this.adopt(snapshot);
+        const line=sourceLines(this.editor.text())[Math.max(0,match.line-1)],from=match.from??0,to=match.to??0;
+        if(line && line.text===match.text && Number.isInteger(from) && Number.isInteger(to) && from>=0 && to>=from && to<=line.text.length)
+          this.editor.select({from:line.from+from,to:line.from+to});
+      })().catch(error=>this.report(error));}); results.append(control); } }
+    catch(error){if(current())throw error;}
     finally { if (this.searchJob === jobId) this.searchJob = ''; if (!this.disposed) this.query('[data-action="cancel-job"]').hidden = !(this.exportJob || this.toolJob || this.searchJob); }
   }
   private async quickOpen() {
     if (!this.workspace && !this.documents.size) throw new Error('Open a folder or document first.'); const dialog = modal(this.root,'Quick Open'), query = input('search'); query.placeholder = 'Search file names'; dialog.body.append(field('File name',query)); const results = document.createElement('div'); results.className = 'quick-results'; const note = document.createElement('p'); dialog.body.append(results,note);
-    const render = () => { results.replaceChildren(); const files = [...this.knownFiles.values()].filter(entry => !entry.isDirectory); const recent=this.preferences.recentFiles.map(path=>({path,name:basename(path)})); const opened = [...this.documents.values()].filter(doc => doc.path).map(doc => ({path:doc.path,name:basename(doc.path!)})); const unique = new Map([...recent,...opened,...files].map(file => [file.path,file])); const matches = [...unique.values()].filter(file => file.name.toLowerCase().includes(query.value.toLowerCase())).slice(0,100); for (const file of matches) { const control = button(file.name); control.title = file.path; control.addEventListener('click',() => { dialog.close(); void this.openPath(file.path).catch(error => this.report(error)); }); results.append(control); } if (!matches.length) results.textContent = 'No matching files. Open a folder to search more documents.'; };
+    const render = () => { results.replaceChildren(); const files = [...this.knownFiles.values()].filter(entry => !entry.isDirectory); const recent=this.preferences.recentFiles.map(path=>({path,name:basename(path)})); const opened = [...this.documents.values()].filter(doc => doc.path).map(doc => ({path:doc.path,name:basename(doc.path!)})); const unique = new Map([...recent,...opened,...files].map(file => [file.path,file])); const matches = [...unique.values()].filter(file => file.name.normalize('NFC').toLowerCase().includes(query.value.normalize('NFC').toLowerCase())).slice(0,100); for (const file of matches) { const control = button(file.name); control.title = file.path; control.addEventListener('click',() => { dialog.close(); void this.openPath(file.path).catch(error => this.report(error)); }); results.append(control); } if (!matches.length) results.textContent = 'No matching files. Open a folder to search more documents.'; };
     query.addEventListener('input',render); render();const folders=document.createElement('div');for(const path of new Set([...this.preferences.pinnedFolders,...this.preferences.recentFolders])){const control=button(`${this.preferences.pinnedFolders.includes(path)?'Pinned':'Folder'}: ${basename(path)}`);control.title=path;control.addEventListener('click',()=>{dialog.close();void this.openWorkspace(path).catch(error=>this.report(error));});folders.append(control);}dialog.body.append(folders);
     if (this.workspace) { note.textContent = 'Scanning file names…'; const queue = [this.workspace]; let directories = 0; while (queue.length && directories < 200 && dialog.element.isConnected) { const path = queue.shift()!; const entries: any = await this.client.call('listDirectory',{path}); directories++; for (const entry of Array.isArray(entries) ? entries : entries?.entries ?? []) { this.knownFiles.set(entry.path,entry); if (entry.isDirectory) queue.push(entry.path); } } if (dialog.element.isConnected) { note.textContent = queue.length ? 'Directory limit reached. Browse deeper folders to add their files.' : `${this.knownFiles.size} paths scanned.`; render(); } }
   }
@@ -474,9 +550,17 @@ export class MoriApp {
     })().catch(error=>{apply.disabled=false;this.report(error);});});dialog.footer.append(apply);
   }
   private async checkProofreading(text:string):Promise<ProofreadingResult> {
-    const automatic=(text.match(/[가-힣]/g)?.length??0)>2?'ko':/[a-zA-Z]{3}/.test(text)?'en':this.preferences.language;
-    const result=normalizeProofreadingResult(text,await this.client.call('proofread',{operation:'check',text,language:this.preferences.spellLanguage==='auto'?automatic:this.preferences.spellLanguage,ignoredWords:this.preferences.personalDictionary}));
-    if((this.preferences.spellLanguage==='ko'||(this.preferences.spellLanguage==='auto'&&automatic==='ko'))&&/[a-zA-Z]{3}/.test(text)){const english=normalizeProofreadingResult(text,await this.client.call('proofread',{operation:'check',text,language:'en',ignoredWords:this.preferences.personalDictionary}));for(const issue of english.issues.filter(issue=>/^[a-zA-Z][a-zA-Z'’ -]*$/.test(text.slice(issue.from,issue.to)))){const same=result.issues.findIndex(other=>other.from===issue.from&&other.to===issue.to&&other.kind===issue.kind);if(same>=0)result.issues[same]=issue;else if(!result.issues.some(other=>other.from<issue.to&&other.to>issue.from))result.issues.push(issue);}}
+    const automatic=/\p{Script=Hangul}/u.test(text)?'ko':'en',language=this.preferences.spellLanguage==='auto'?automatic:this.preferences.spellLanguage;
+    const result=normalizeProofreadingResult(text,await this.client.call('proofread',{operation:'check',text,language,ignoredWords:this.preferences.personalDictionary}));
+    if(language==='ko'&&/[a-zA-Z]/.test(text)){
+      const english=normalizeProofreadingResult(text,await this.client.call('proofread',{operation:'check',text,language:'en',ignoredWords:this.preferences.personalDictionary}));
+      const englishIssue=(issue:ProofreadingIssue)=>/^[a-zA-Z][a-zA-Z'’ -]*$/.test(text.slice(issue.from,issue.to));
+      result.issues=result.issues.filter(issue=>issue.kind!=='spelling'||!englishIssue(issue));
+      for(const issue of english.issues.filter(englishIssue)){
+        const same=result.issues.findIndex(other=>other.from===issue.from&&other.to===issue.to&&other.kind===issue.kind);
+        if(same>=0)result.issues[same]=issue;else if(!result.issues.some(other=>other.from<issue.to&&other.to>issue.from))result.issues.push(issue);
+      }
+    }
     result.issues=result.issues.filter(issue=>issue.kind==='spelling'?this.preferences.spellcheck:this.preferences.grammarCheck).sort((a,b)=>a.from-b.from||a.to-b.to);return result;
   }
   private async learnWord(word:string) {const result:any=await this.client.call('proofread',{operation:'learn',word});this.setPreference('personalDictionary',result?.personalDictionary??[...this.preferences.personalDictionary,word]);await this.persist();}
@@ -485,10 +569,11 @@ export class MoriApp {
     const lookup=button('Look Up');const run=()=>{const term=word.value.trim();if(!term){word.focus();return;}lookup.disabled=true;definition.textContent=this.ui('Looking up the local dictionary…','설치된 사전에서 찾는 중…');void this.client.call<any>('proofread',{operation:'lookup',text:term}).then(result=>{if(!dialog.element.isConnected)return;definition.textContent=result?.definition||this.ui('No definition was found in the installed dictionaries. Try another word.','설치된 사전에서 뜻을 찾지 못했습니다. 다른 단어를 입력해 보세요.');if(result?.note){const note=document.createElement('p');note.textContent=result.note;definition.append(note);}for(const suggestion of result?.suggestions??[]){const control=button(suggestion);control.dataset.userContent='true';control.addEventListener('click',()=>{word.value=suggestion;run();});definition.append(control);}}).catch(error=>{if(dialog.element.isConnected)definition.textContent=error instanceof Error?error.message:String(error);}).finally(()=>{lookup.disabled=false;});};lookup.addEventListener('click',run);word.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault();run();}});dialog.footer.append(lookup);if(selected)run();
   }
   private annotateProofreading(element?:HTMLElement) {
-    const current=this.proofreadingResult;if(!current||current.source!==this.editor.text())return;
+    const current=this.proofreadingResult;if(!current)return;
+    const source=this.editor.text(),result={...current.result,issues:current.source===source?current.result.issues.filter(issue=>issue.kind==='spelling'?this.preferences.spellcheck:this.preferences.grammarCheck):[]};
     for(const surface of element?[element]:[...this.root.querySelectorAll<HTMLElement>('.live-block,.reading')]){
       const from=surface.dataset.sourceOffset?Number(surface.dataset.sourceOffset):0;
-      annotatePreview(surface,current.source,current.result,{from,onIssue:issue=>{if(this.preferences.mode==='reading')this.setMode('live');this.editor.select({from:issue.from,to:issue.to});showProofreadingSuggestions(this.editor.view);}});
+      annotatePreview(surface,source,result,{from,onIssue:issue=>{if(this.preferences.mode==='reading')this.setMode('live');this.editor.select({from:issue.from,to:issue.to});showProofreadingSuggestions(this.editor.view);}});
     }
   }
   private async loadThemes() {
@@ -503,10 +588,13 @@ export class MoriApp {
     const dialog=modal(this.root,'Themes');dialog.element.classList.add('theme-dialog');
     const note=document.createElement('p');note.textContent=this.ui('Choose a document style. Your Markdown content stays unchanged.','문서의 색과 글꼴을 선택하세요. Markdown 내용은 바뀌지 않습니다.');dialog.body.append(note);
     const list=document.createElement('div');list.className='theme-list';list.setAttribute('role','group');list.setAttribute('aria-label',this.ui('Document themes','문서 테마'));dialog.body.append(list);
-    const render=()=>{list.replaceChildren();for(const theme of [...builtInThemes,...this.userThemes]){const control=button(theme.name);control.dataset.themeOption=theme.id;control.setAttribute('aria-pressed',String(resolveDocumentTheme(this.preferences.documentTheme,this.userThemes).id===theme.id));const label=document.createElement('strong');if(theme.id.startsWith('user:'))label.dataset.userContent='true';label.textContent=theme.name;control.replaceChildren(label);if(theme.description){const description=document.createElement('small');description.textContent=theme.description;control.append(description);}control.addEventListener('click',()=>void this.chooseTheme(theme.id).then(render).catch(error=>this.report(error)));list.append(control);}}
+    const render=()=>{
+      list.replaceChildren();for(const tools of dialog.body.querySelectorAll('.theme-file-tools'))tools.remove();
+      for(const theme of [...builtInThemes,...this.userThemes]){const control=button(theme.name);control.dataset.themeOption=theme.id;control.setAttribute('aria-pressed',String(resolveDocumentTheme(this.preferences.documentTheme,this.userThemes).id===theme.id));const label=document.createElement('strong');if(theme.id.startsWith('user:'))label.dataset.userContent='true';label.textContent=theme.name;control.replaceChildren(label);if(theme.description){const description=document.createElement('small');description.textContent=theme.description;control.append(description);}control.addEventListener('click',()=>void this.chooseTheme(theme.id).then(render).catch(error=>this.report(error)));list.append(control);}
+      for(const theme of this.userThemes){const tools=document.createElement('div');tools.className='theme-file-tools';const title=document.createElement('span');title.dataset.userContent='true';title.textContent=theme.name;const edit=button('Edit CSS'),remove=button('Delete Theme');edit.addEventListener('click',()=>this.editTheme(theme.id));remove.addEventListener('click',()=>this.deleteTheme(theme.id));tools.append(title,edit,remove);dialog.body.append(tools);}
+    };
     render();const importTheme=button('Import CSS Theme…'),create=button('New CSS Theme…'),folder=button('Open Theme Folder'),refresh=button('Refresh Themes');
     importTheme.addEventListener('click',()=>void this.importTheme().catch(error=>this.report(error)));create.addEventListener('click',()=>this.editTheme());folder.addEventListener('click',()=>void this.client.call('themeFiles',{operation:'openFolder'}).catch(error=>this.report(error)));refresh.addEventListener('click',()=>void this.loadThemes().then(render).catch(error=>this.report(error)));dialog.footer.append(importTheme,create,folder,refresh);
-    for(const theme of this.userThemes){const tools=document.createElement('div');tools.className='theme-file-tools';const title=document.createElement('span');title.textContent=theme.name;const edit=button('Edit CSS'),remove=button('Delete Theme');edit.addEventListener('click',()=>this.editTheme(theme.id));remove.addEventListener('click',()=>this.deleteTheme(theme.id));tools.append(title,edit,remove);dialog.body.append(tools);}
   }
   private async importTheme() {
     const before=new Set(this.rawThemes.map(theme=>theme.id)),result:any=await this.client.call('themeFiles',{operation:'import'});if(!result)return;
@@ -530,7 +618,7 @@ export class MoriApp {
     const dialog = modal(this.root,'Settings'),targetDoc=this.current(),scope=input('checkbox',String(this.hasDocumentPreferences()));scope.setAttribute('data-document-preference-scope','');scope.disabled=!targetDoc;dialog.body.append(field('Use settings only for this document',scope));
     const scopeNote=document.createElement('p');scopeNote.textContent=this.ui('Document scope applies to document appearance, editing and proofreading. App icon, language and startup behavior apply to the whole app.','문서별 설정은 문서 모양·편집·맞춤법 검사에 적용됩니다. 앱 아이콘·언어·시작 동작은 앱 전체에 적용됩니다.');scopeNote.dataset.scopeNote='true';dialog.body.append(scopeNote);
     const resetDocument=button('Reset Document Settings','reset-document-settings');resetDocument.disabled=!this.hasDocumentPreferences();dialog.footer.append(resetDocument);
-    const refreshSettingsScope=()=>{for(const control of dialog.body.querySelectorAll<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>('[data-setting]')){const key=control.dataset.setting as keyof Preferences;control.disabled=scope.checked && !documentPreferenceSet.has(key) && key!=='language' && key!=='appIcon';const value=this.preferences[key];if(control instanceof HTMLInputElement && control.type==='checkbox')control.checked=!!value;else if(control instanceof HTMLInputElement && control.type==='radio')control.checked=control.value===value;else control.value=String(value ?? '');}resetDocument.disabled=!this.hasDocumentPreferences(targetDoc);};
+    const refreshSettingsScope=()=>{for(const control of dialog.body.querySelectorAll<HTMLInputElement|HTMLSelectElement|HTMLTextAreaElement>('[data-setting]')){const key=control.dataset.setting as keyof Preferences;control.disabled=scope.checked && !documentPreferenceSet.has(key) && key!=='language' && key!=='appIcon';const value=this.preferences[key];if(control instanceof HTMLInputElement && control.type==='checkbox')control.checked=!!value;else if(control instanceof HTMLInputElement && control.type==='radio')control.checked=control.value===value;else control.value=key==='personalDictionary'?this.preferences.personalDictionary.join('\n'):String(value ?? '');}resetDocument.disabled=!this.hasDocumentPreferences(targetDoc);};
     scope.addEventListener('change',()=>{if(targetDoc && this.setDocumentScope(targetDoc,scope.checked)){clearPreviewCache();this.refreshContent();refreshSettingsScope();void this.persist().catch(error=>this.report(error));}});
     resetDocument.addEventListener('click',()=>{if(targetDoc && this.setDocumentScope(targetDoc,false)){scope.checked=false;clearPreviewCache();this.refreshContent();refreshSettingsScope();void this.persist().catch(error=>this.report(error));}});
     const iconGroup=document.createElement('fieldset'),iconLegend=document.createElement('legend'),iconOptions=document.createElement('div');
@@ -593,12 +681,11 @@ export class MoriApp {
       case 'duplicate': this.adopt(normalizeSnapshot(await this.client.call('createDocument',{text:this.editor.text()}))); break;
       case 'autoindent-selected': case 'autoindent-all': if(this.preferences.mode==='reading')this.setMode('source');this.editor.autoIndent(action==='autoindent-all');break;
       case 'copy-code': {const source=this.editor.text(),selection=this.editor.selection();let found:string|undefined;markdownParser.parse(source).iterate({enter(node){if(node.name==='FencedCode' && node.from<=selection.from && node.to>=selection.to){const marks=node.node.getChildren('CodeMark'),lines=sourceLines(source),start=lines[lineAt(lines,marks[0]?.from??node.from)].end,end=marks.length>1?lines[lineAt(lines,marks.at(-1)!.from)].from:node.to;found=source.slice(start,end);return false;}}});if(found===undefined)throw new Error('Place the cursor in one code block first.');await this.client.call('clipboard',{operation:'write',text:found});this.status('Code copied.');break;}
-      case 'undo': undo(this.editor.view); break;
-      case 'redo': redo(this.editor.view); break;
+      case 'undo': case 'redo': this.historyAction(action); break;
       case 'sidebar': { const sidebar = this.query('.sidebar'); sidebar.hidden = !sidebar.hidden; this.query('[data-action="sidebar"]').setAttribute('aria-expanded',String(!sidebar.hidden)); break; }
       case 'files': this.showPanel('files'); break;
       case 'outline': this.showPanel('outline'); this.refreshContent(); break;
-      case 'find': this.searchMode = 'document'; this.showPanel('search'); this.updateSearch(); this.query('[data-control="find"]').focus(); break;
+      case 'find': this.invalidateSearch();this.searchMode = 'document'; this.showPanel('search'); this.updateSearch(); this.query('[data-control="find"]').focus(); break;
       case 'next-match': this.nextMatch(1); break;
       case 'previous-match': this.nextMatch(-1); break;
       case 'replace-one': this.replaceSearch(false); break;
@@ -613,7 +700,7 @@ export class MoriApp {
       case 'spellcheck': this.setPreference('spellcheck',!this.preferences.spellcheck,this.hasDocumentPreferences());await this.persist();break;
       case 'dictionary': this.dictionaryDialog();break;
       case 'statistics': {const popover=this.query<HTMLDetailsElement>('.document-info');popover.open=!popover.open;break;}
-      case 'save-all': for(const doc of this.documents.values())if(doc.revision!==doc.savedRevision)await this.saveRecord(doc);break;
+      case 'save-all': for(const doc of this.documents.values())if(this.isDirty(doc))await this.saveRecord(doc);break;
       case 'close-document': if(this.current())await this.closeDocument(this.current()!);break;
       case 'close-all': {let complete=true;for(const doc of [...this.documents.values()])if(!(await this.closeDocument(doc,false))){complete=false;break;}if(complete&&!this.documents.size)await this.action('new');break;}
       case 'reopen-closed': {const closed=this.closedDocuments.at(-1);if(!closed)break;if(closed.keptDraft){this.adopt(normalizeSnapshot(await this.client.call('restoreDocument',{documentId:closed.documentId})),true);this.recoveries=this.recoveries.filter(recovery=>(recovery.snapshot??recovery).documentId!==closed.documentId);}else if(closed.path)await this.openPath(closed.path);else this.adopt(normalizeSnapshot(await this.client.call('createDocument',{text:closed.text})));this.closedDocuments.pop();break;}
@@ -645,7 +732,7 @@ export class MoriApp {
         this.status('Images reloaded.');break;
       }
       case 'recoveries': await this.recoveryDialog(); break;
-      case 'import': { const value = await this.client.call('importDocument'); if (value) this.adopt(normalizeSnapshot(value)); break; }
+      case 'import': { const value = await this.client.call('importDocument'); if (value) {const snapshot=normalizeSnapshot(value);if(!snapshot.path&&this.unsavedAssetRoot)this.assetRoots.set(snapshot.documentId,this.unsavedAssetRoot);this.adopt(snapshot);} break; }
       case 'export-options': this.exportDialog(); break;
       case 'copy-math-tex': case 'copy-math-mathml': case 'copy-math-svg': case 'save-math-tex': case 'save-math-mathml': case 'save-math-svg': case 'copy-diagram-svg': case 'save-diagram-svg': await this.mediaAction(action);break;
       case 'repeat-export': {const previous=this.lastExports.get(this.activeId);if(!previous)throw new Error('Export this document once before repeating its export.');await this.export(previous.format,{...previous.options,destination:previous.destination});break;}
@@ -870,16 +957,19 @@ export class MoriApp {
       this.clearCheckpoint(doc.documentId);
       await this.client.call('checkpoint',{documentId:doc.documentId,text:this.publishedSource(doc),revision:doc.revision});
     }
-    return signature===this.closeStateSignature() && !this.editor.view.compositionStarted;
+    return !this.formatJobs.size && signature===this.closeStateSignature() && !this.editor.view.compositionStarted;
   }
   async prepareForClose(reason:'quit'|'window'='window'):Promise<boolean>{
     if(this.disposed)return true;
+    if(this.formatJobs.size){this.status('Wait for the encoding change to finish before closing.');return false;}
     if(this.editor.view.compositionStarted){this.status('Finish composing text before closing this window.');return false;}
+    while(this.saveQueues.size)await Promise.all([...this.saveQueues.values()]);
+    if(this.disposed)return true;
     await this.persist();
     if(this.editor.view.compositionStarted){this.status('Finish composing text before closing this window.');return false;}
     if(!(await this.checkpointForClose())){this.status('Documents changed while preparing to close. Try again after editing.');return false;}
-    const dirty=[...this.documents.values()].filter(doc=>doc.revision!==doc.savedRevision);
-    if(reason==='quit' && this.preferences.restoreUnsaved){const signature=this.closeStateSignature();for(const doc of dirty){await this.client.call('keepRecovery',{documentId:doc.documentId,revision:doc.revision});this.draftRevisions.set(doc.documentId,doc.revision);}await this.persist();return signature===this.closeStateSignature()&&!this.editor.view.compositionStarted;}
+    const dirty=[...this.documents.values()].filter(doc=>this.isDirty(doc));
+    if(reason==='quit' && this.preferences.restoreUnsaved){const signature=this.closeStateSignature();for(const doc of dirty){await this.client.call('keepRecovery',{documentId:doc.documentId,revision:doc.revision});this.draftRevisions.set(doc.documentId,doc.revision);}await this.persist();return !this.formatJobs.size&&signature===this.closeStateSignature()&&!this.editor.view.compositionStarted;}
     if(!dirty.length)return true;
     return await new Promise<boolean>(resolve=>{
       const dialog=modal(this.root,'Unsaved documents');const description=document.createElement('p');
@@ -888,7 +978,7 @@ export class MoriApp {
       const cancel=button('Cancel'),keep=button('Keep Recovery'),save=button('Save All');
       cancel.addEventListener('click',()=>finish(false));
       keep.addEventListener('click',()=>{keep.disabled=true;save.disabled=true;void this.checkpointForClose().then(current=>{if(current)finish(true);else{keep.disabled=false;save.disabled=false;this.status('Documents changed while keeping recovery. Finish editing and try again.');}}).catch(error=>{keep.disabled=false;save.disabled=false;this.report(error);});});
-      save.addEventListener('click',()=>{save.disabled=true;void(async()=>{for(const doc of [...this.documents.values()].filter(doc=>doc.revision!==doc.savedRevision)){this.adopt(doc);await this.save();}finish([...this.documents.values()].every(doc=>doc.revision===doc.savedRevision)&&!this.editor.view.compositionStarted);})().catch(error=>{save.disabled=false;this.report(error);});});
+      save.addEventListener('click',()=>{save.disabled=true;void(async()=>{for(const doc of [...this.documents.values()].filter(doc=>this.isDirty(doc))){this.adopt(doc);await this.save();}finish([...this.documents.values()].every(doc=>!this.isDirty(doc))&&!this.editor.view.compositionStarted);})().catch(error=>{save.disabled=false;this.report(error);});});
       dialog.footer.append(cancel,keep,save);
       dialog.element.querySelector('header button')!.addEventListener('click',()=>finish(false));
       dialog.element.addEventListener('cancel',()=>finish(false));
@@ -897,7 +987,7 @@ export class MoriApp {
       dialog.element.addEventListener('click',event=>{if(event.target===dialog.element)finish(false);});
     });
   }
-  destroy() { this.disposed = true;this.stopFileWork();this.localizer?.destroy(); this.events.abort(); for (const timer of this.checkpointTimers.values()) clearTimeout(timer); if (this.refreshTimer) clearTimeout(this.refreshTimer); this.media.removeEventListener('change',this.mediaChange); this.outlineNavigator.destroy(); this.editor.destroy(); this.client.dispose(); if ((window as any).__nativeCommand === this.nativeReceiver) (window as any).__nativeCommand = typeof this.nativePrevious === 'function' ? this.nativePrevious : () => {}; if((window as any).__moriBeforeClose===this.closeReceiver)(window as any).__moriBeforeClose=this.closePrevious;this.root.querySelector('dialog')?.dispatchEvent(new Event('mori-dismiss'));this.root.replaceChildren(); }
+  destroy() { if(this.disposed)return;this.disposed = true;this.cancelTypewriterFrame();this.invalidateSearch();this.stopFileWork();this.localizer?.destroy(); this.events.abort(); for (const timer of this.checkpointTimers.values()) clearTimeout(timer); if (this.refreshTimer) clearTimeout(this.refreshTimer); this.media.removeEventListener('change',this.mediaChange); this.outlineNavigator.destroy(); this.editor.destroy(); this.client.dispose(); if ((window as any).__nativeCommand === this.nativeReceiver) (window as any).__nativeCommand = typeof this.nativePrevious === 'function' ? this.nativePrevious : () => {}; if((window as any).__moriBeforeClose===this.closeReceiver)(window as any).__moriBeforeClose=this.closePrevious;this.root.querySelector('dialog')?.dispatchEvent(new Event('mori-dismiss'));this.root.replaceChildren(); }
 }
 export async function mountApp(root: HTMLElement, client?: NativeClient): Promise<MoriApp> { const app = new MoriApp(root,client); await app.start(); return app; }
 if (typeof document !== 'undefined') { const root = document.getElementById('app'); if (root) void mountApp(root).catch(error => { root.textContent = error instanceof Error ? error.message : String(error); }); }

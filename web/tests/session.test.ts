@@ -19,3 +19,9 @@ test('cursor and scroll positions belong only to restored paths and survive rena
   assert.deepEqual(session.views,{'/a.md':{anchor:3,head:8,scroll:120}});
   assert.deepEqual(moveSessionPath(session,'/a.md','/renamed.md').views,{'/renamed.md':{anchor:3,head:8,scroll:120}});
 });
+test('the session document cap also bounds active identity, view state and draft revisions',()=>{
+  const documents=Array.from({length:101},(_,index)=>({documentId:`D${index}`,path:null}));
+  const session=normalizeSession({documents,activeDocumentId:'D100',views:{D100:{anchor:4,head:4,scroll:8}},draftRevisions:{D100:3}});
+  assert.equal(session.documents!.length,100);assert.equal(session.activeDocumentId,'D0');
+  assert.equal(session.views?.D100,undefined);assert.equal(session.draftRevisions?.D100,undefined);
+});

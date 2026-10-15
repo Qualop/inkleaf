@@ -63,13 +63,16 @@ public actor DocumentStore {
         if let path {
             record.snapshot.path=try FileIO.url(path).path
         } else {record.snapshot.path=nil;record.snapshot.savedDigest=nil}
+        if try hasRecovery(id: id) {
+            try writeRecovery(record)
+        }
         records[id]=record;return record.snapshot
     }
     public func verifySaved(id:String) throws -> DocumentSnapshot {
         guard let record=records[id] else {throw DocumentError.unknownDocument(id)}
         guard let path=record.snapshot.path else {throw DocumentError.invalidPath("Document has no saved file")}
-        let bytes=try FileIO.read(FileIO.url(path))
-        guard FileIO.digest(bytes)==record.snapshot.savedDigest else {throw DocumentError.conflict(path)}
+        let digest=try FileIO.diskDigest(FileIO.url(path,resolveSymlinks:false))
+        guard digest==record.snapshot.savedDigest else {throw DocumentError.conflict(path)}
         return record.snapshot
     }
 
@@ -87,7 +90,7 @@ public actor DocumentStore {
     public func reload(id: String, revision: Int) throws -> DocumentSnapshot {
         var record = try checkedRecord(id: id, revision: revision)
         guard let path = record.snapshot.path else { throw DocumentError.invalidPath("Untitled document has no disk version") }
-        let url = try FileIO.url(path), bytes = try FileIO.read(url)
+        let url = try FileIO.url(path, resolveSymlinks: false), bytes = try FileIO.read(url)
         let decoded = try TextCodec.decode(bytes, path: path)
         record.snapshot.text = decoded.text; record.snapshot.revision = revision
         record.snapshot.savedDigest = FileIO.digest(bytes); record.snapshot.encoding = decoded.encoding
@@ -103,14 +106,13 @@ public actor DocumentStore {
         guard force || !enforceExpectedDigest || expectedDigest == record.snapshot.savedDigest else {
             throw DocumentError.conflict(path)
         }
-        let url = try FileIO.url(path)
+        let url = try FileIO.url(path, resolveSymlinks: false)
         let bytes = try TextCodec.encode(text, encoding: record.snapshot.encoding, hasBOM: record.hasBOM)
         let originalDigest = record.snapshot.savedDigest
         let check: () throws -> Void = {
             guard !force else { return }
             do {
-                let disk = try FileIO.read(url)
-                guard FileIO.digest(disk) == originalDigest else { throw DocumentError.conflict(path) }
+                guard try FileIO.diskDigest(url) == originalDigest else { throw DocumentError.conflict(path) }
             } catch DocumentError.missing { throw DocumentError.conflict(path) }
         }
         try check()
@@ -155,12 +157,7 @@ public actor DocumentStore {
         if record.snapshot.savedDigest == FileIO.digest(bytes) {
             try removeRecovery(id: id)
         } else {
-            try FileIO.directory(recoveryDirectory, create: true)
-            do {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys]
-                try FileIO.write(encoder.encode(record), to: recoveryURL(id: id))
-            } catch { throw FileIO.mapped(error, path: recoveryDirectory.path) }
+            try writeRecovery(record)
         }
         records[id] = record
     }
@@ -263,10 +260,32 @@ public actor DocumentStore {
         } catch { throw FileIO.mapped(error, path: url.path) }
     }
 
+    private func writeRecovery(_ record: Record) throws {
+        try FileIO.directory(recoveryDirectory, create: true)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            try FileIO.write(encoder.encode(record), to: recoveryURL(id: record.snapshot.documentId))
+        } catch { throw FileIO.mapped(error, path: recoveryDirectory.path) }
+    }
+
     private func removeRecovery(id: String) throws {
         let url = recoveryURL(id: id)
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard try hasRecovery(id: id) else { return }
         do { try FileManager.default.removeItem(at: url) }
         catch { throw FileIO.mapped(error, path: url.path) }
+    }
+
+    private func hasRecovery(id: String) throws -> Bool {
+        let url = recoveryURL(id: id)
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else { throw DocumentError.invalidPath(url.path) }
+            return true
+        } catch {
+            let mapped = FileIO.mapped(error, path: url.path)
+            if case .missing = mapped { return false }
+            throw mapped
+        }
     }
 }

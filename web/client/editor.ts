@@ -23,6 +23,12 @@ export const normalized = (text: string) => text.replace(/\r\n|\r/g, '\n');
 const codeLanguages={javascript:javascript().language,typescript:javascript({typescript:true}).language,python:python().language,json:json().language,css:css().language,html:html().language};
 function codeLanguage(info:string){const name=info.trim().split(/\s+/)[0].toLowerCase(),alias:Record<string,string>={js:'javascript',jsx:'javascript',ts:'typescript',tsx:'typescript',py:'python',htm:'html'};return codeLanguages[(alias[name]??name) as keyof typeof codeLanguages]??null;}
 export function sourceToCM(text: string, position: number): number { return normalized(text.slice(0, position)).length; }
+function safeSourceToCM(text:string,value:number):number {
+  let offset=Math.max(0,Math.min(text.length,Math.floor(value)));
+  const before=text.charCodeAt(offset-1),after=text.charCodeAt(offset);
+  if((before>=0xd800&&before<=0xdbff&&after>=0xdc00&&after<=0xdfff)||(text[offset-1]==='\r'&&text[offset]==='\n'))offset--;
+  return sourceToCM(text,offset);
+}
 export function cmToSource(text: string, position: number): number {
   let source = 0, offset = 0;
   for (const match of text.matchAll(/\r\n|\r|\n/g)) {
@@ -62,7 +68,7 @@ export class DocumentEditor {
       EditorState.transactionFilter.of(transaction=>this.locked&&transaction.docChanged?[]:transaction),
       ...(this.options.proofreading?[proofreading({...this.options.proofreading,getText:state=>state.field(sourceField).text})]:[]),
       invertedEffects.of(transaction => transaction.docChanged || transaction.effects.some(effect => effect.is(sourceEffect)) ? [sourceEffect.of(transaction.startState.field(sourceField))] : []),
-      keymap.of([{ key: 'Mod-b', run: shortcut('bold') }, { key: 'Mod-i', run: shortcut('italic') }, { key: 'Mod-u', run: shortcut('underline') }, ...['s', 'o', 'n', 'f', 'p'].map(key => ({ key: `Mod-${key}`, run: () => { this.options.onShortcut?.(({ s: 'save', o: 'open', n: 'new', f: 'find', p: 'quick-open' } as any)[key]); return true; } })), ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
+      keymap.of([{ key: 'Mod-b', run: shortcut('bold') }, { key: 'Mod-i', run: shortcut('italic') }, { key: 'Mod-u', run: shortcut('underline') }, ...([['Mod-s','save'],['Mod-o','open'],['Mod-n','new'],['Mod-f','find'],['Mod-p','print'],['Mod-Alt-o','quick-open']] as const).map(([key,action]) => ({ key, run: () => { this.options.onShortcut?.(action); return true; } })), ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap]),
       this.preview.of(this.previewExtension()), this.editable.of([EditorView.editable.of(this.currentMode !== 'reading'), EditorState.readOnly.of(this.currentMode === 'reading')]),
       this.wrap.of(this.configuration.wrap ? EditorView.lineWrapping : []), this.numbers.of(this.configuration.lineNumbers ? lineNumbers() : []), this.appearance.of(this.languageExtension()),
       EditorView.domEventHandlers({paste:event=>this.options.onPaste?.(event)??false,drop:event=>this.options.onDrop?.(event)??false}),
@@ -73,7 +79,7 @@ export class DocumentEditor {
       }),
     ] });
   }
-  private inputExtensions(){return [EditorState.tabSize.of(this.configuration.tabSize),indentUnit.of(' '.repeat(this.configuration.tabSize)),EditorView.contentAttributes.of({'aria-label':'Markdown document',spellcheck:String(this.configuration.spellcheck)}),...(this.configuration.pairing?[closeBrackets()]:[]),...(this.configuration.emojiCompletion?[autocompletion(),EditorState.languageData.of(()=>[{autocomplete:emojiCompletionSource}])]:[])];}
+  private inputExtensions(){return [EditorState.tabSize.of(this.configuration.tabSize),indentUnit.of(' '.repeat(this.configuration.tabSize)),EditorView.contentAttributes.of({'aria-label':'Markdown document',spellcheck:String(!this.options.proofreading&&this.configuration.spellcheck),...(this.options.proofreading?{autocorrect:'off',autocapitalize:'off'}:{})}),...(this.configuration.pairing?[closeBrackets()]:[]),...(this.configuration.emojiCompletion?[autocompletion(),EditorState.languageData.of(()=>[{autocomplete:emojiCompletionSource}])]:[])];}
   private previewExtension() { return this.currentMode === 'live' ? livePreview({ typeset: this.options.typeset, openExternal: this.options.openExternal }) : []; }
   private languageExtension(){return markdown({base:this.configuration.strictSyntax?commonmarkLanguage:markdownLanguage,codeLanguages:codeLanguage});}
   open(snapshot: NativeSnapshot): void {
@@ -92,8 +98,8 @@ export class DocumentEditor {
     const text=session.state.field(sourceField).text,selection=session.state.selection.main;return {anchor:cmToSource(text,selection.anchor),head:cmToSource(text,selection.head),scroll:session.scroll};
   }
   restoreView(position:DocumentViewState):void{
-    const text=this.text(),safe=(value:number)=>{let offset=Math.max(0,Math.min(text.length,Math.floor(value)));const before=text.charCodeAt(offset-1),after=text.charCodeAt(offset);if((before>=0xd800&&before<=0xdbff&&after>=0xdc00&&after<=0xdfff)||(text[offset-1]==='\r'&&text[offset]==='\n'))offset--;return sourceToCM(text,offset);};
-    this.view.dispatch({selection:{anchor:safe(position.anchor),head:safe(position.head)}});this.view.scrollDOM.scrollTop=position.scroll;
+    const text=this.text();
+    this.view.dispatch({selection:{anchor:safeSourceToCM(text,position.anchor),head:safeSourceToCM(text,position.head)}});this.view.scrollDOM.scrollTop=position.scroll;
   }
   autoIndent(all=false):void{
     if(this.currentMode==='reading')this.mode('source');const original=this.view.state.selection;
@@ -114,7 +120,7 @@ export class DocumentEditor {
     while (from < endOld && from < endNew && old[from] === next[from]) from++;
     while (endOld > from && endNew > from && old[endOld - 1] === next[endNew - 1]) { endOld--; endNew--; }
     const current = this.view.state.field(sourceField), eol=lineEnding==='CRLF'?'\r\n':lineEnding==='LF'?'\n':current.eol;
-    this.view.dispatch({ changes: { from, to: endOld, insert: next.slice(from, endNew) }, effects: sourceEffect.of({ text,eol }), selection: { anchor: sourceToCM(text, Math.min(text.length, selection.from)), head: sourceToCM(text, Math.min(text.length, selection.to)) }, annotations: [Transaction.userEvent.of('input.command'), isolateHistory.of('full')], scrollIntoView: true });
+    this.view.dispatch({ changes: { from, to: endOld, insert: next.slice(from, endNew) }, effects: sourceEffect.of({ text,eol }), selection: { anchor: safeSourceToCM(text,selection.from), head: safeSourceToCM(text,selection.to) }, annotations: [Transaction.userEvent.of('input.command'), isolateHistory.of('full')], scrollIntoView: true });
   }
   mode(mode: 'source' | 'live' | 'reading'): void { this.currentMode = mode; this.view.dispatch({ effects: [this.preview.reconfigure(this.previewExtension()), this.editable.reconfigure([EditorView.editable.of(mode !== 'reading'&&!this.locked), EditorState.readOnly.of(mode === 'reading'||this.locked)]),this.numbers.reconfigure(mode==='source'&&this.configuration.lineNumbers?lineNumbers():[])] }); this.view.dom.dataset.mode = mode; }
   setLocked(locked:boolean):void {this.locked=locked;this.mode(this.currentMode);}

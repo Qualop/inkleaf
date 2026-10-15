@@ -36,7 +36,6 @@ export function scopeThemeCSS(source:string):string {
   for(const match of source.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)){
     const url=(match[1]??match[2]??match[3]??'').trim();if(url && !url.startsWith('data:') && !url.startsWith('#'))throw new Error('Theme resource URL must be an embedded local asset.');
   }
-  const documentVariables:string[]=[];
   function rules(css:string):string {
     let output='',start=0,quote='',comment=false,round=0;
     for(let i=0;i<css.length;i++){
@@ -54,7 +53,18 @@ export function scopeThemeCSS(source:string):string {
       if(/^@(media|supports|layer|container)\b/i.test(header))output+=header+'{'+rules(body)+'}';
       else if(/^@(?:font-face|(?:-webkit-)?keyframes)\b/i.test(header))output+=header+'{'+body+'}';
       else if(header.startsWith('@'))throw new Error('Unsupported theme CSS syntax: '+header);
-      else {if(!header || header.includes(';'))throw new Error('Invalid theme CSS syntax.');output+=selectors(header)+'{'+body+'}';if(splitSelectors(header).some(selector=>['body','html','html body','#write'].includes(selector))){for(const [property,variable] of [['color','--text'],['background-color','--canvas'],['background','--canvas'],['font-family','--theme-font']]){const match=new RegExp('(?:^|;)\\s*'+property+'\\s*:\\s*([^;]+)','i').exec(body);if(match)documentVariables.push(variable+':'+match[1].replace(/!important\s*$/i,'').trim());}}}
+      else {
+        if(!header || header.includes(';'))throw new Error('Invalid theme CSS syntax.');
+        output+=selectors(header)+'{'+body+'}';
+        if(splitSelectors(header).some(selector=>['body','html','html body','#write'].includes(selector))){
+          const variables:string[]=[];
+          for(const [property,variable] of [['color','--text'],['background-color','--canvas'],['background','--canvas'],['font-family','--theme-font']]){
+            const match=new RegExp('(?:^|;)\\s*'+property+'\\s*:\\s*([^;]+)','i').exec(body);
+            if(match)variables.push(variable+':'+match[1].replace(/!important\s*$/i,'').trim());
+          }
+          if(variables.length)output+='\n.mori-app[data-document-theme]{'+variables.join(';')+'}';
+        }
+      }
       start=end+1;i=end;
     }
     if(css.slice(start).replace(/\/\*[\s\S]*?\*\//g,'').trim() || quote || comment || round)throw new Error('Invalid theme CSS syntax.');
@@ -63,7 +73,7 @@ export function scopeThemeCSS(source:string):string {
   const scoped=rules(source.replace(/^\s*@charset\s+["'][^"']+["']\s*;/i,''));
   // Common document-theme variables remain usable without changing other app UI.
   const variables=[/--bg-color\s*:/i.test(source)?'--canvas:var(--bg-color)':'',/--text-color\s*:/i.test(source)?'--text:var(--text-color)':''].filter(Boolean);
-  const mapped=[...documentVariables,...variables];return scoped+(mapped.length?'\n.mori-app[data-document-theme]{'+mapped.join(';')+'}':'');
+  return scoped+(variables.length?'\n.mori-app[data-document-theme]{'+variables.join(';')+'}':'');
 }
 export function normalizeUserThemes(value:unknown):DocumentTheme[] {
   if(!Array.isArray(value))return [];

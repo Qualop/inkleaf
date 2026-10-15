@@ -1,6 +1,7 @@
 import { parseTable, serializeTable, createTable, updateCell, insertRow, removeRow, moveRow, insertColumn, removeColumn, moveColumn, setAlignment } from '../core/tables.ts';
 import type { MarkdownTable, Alignment } from '../core/tables.ts';
 import { markdownBlocks } from '../render/markdown.ts';
+import { lineEnding } from '../core/source.ts';
 import { button, field, input, select, modal } from './dialog.ts';
 import type { DocumentEditor } from './editor.ts';
 export function tableDialog(root: HTMLElement, editor: DocumentEditor, valid: () => boolean, report: (error: unknown) => void): void {
@@ -35,7 +36,7 @@ export function tableDialog(root: HTMLElement, editor: DocumentEditor, valid: ()
   apply.addEventListener('click', () => {
     try {
       if (!valid()) throw new Error('Document changed. Close and reopen the table editor.');
-      const original = source.slice(range.from, range.to), eol = source.includes('\r\n') ? '\r\n' : '\n'; let replacement = serializeTable(table).replace(/\n/g, eol);
+      const original = source.slice(range.from, range.to), eol = lineEnding(source,range.from); let replacement = serializeTable(table).replace(/\n/g, eol);
       if (block) replacement += original.match(/(?:\r\n|\n|\r)$/)?.[0] ?? '';
       else { if (range.from > 0 && !source.slice(0, range.from).endsWith(eol + eol)) replacement = eol + eol + replacement; if (range.to < source.length && !source.slice(range.to).startsWith(eol + eol)) replacement += eol + eol; }
       editor.replace(source.slice(0, range.from) + replacement + source.slice(range.to), { from: range.from, to: range.from + replacement.length }); dialog.close(); editor.view.focus();

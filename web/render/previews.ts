@@ -187,7 +187,13 @@ export async function typesetPreviews(element:HTMLElement,options:PreviewOptions
       try{
         const source=diagramSource(kind,text);
         const mermaid=await diagramEngine(options);let svg='';
-        const render=async()=>{mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:options.dark?'dark':'default',fontFamily:'-apple-system, BlinkMacSystemFont, sans-serif'});svg=(await mermaid.render(`mori-diagram-${jobId}`,source)).svg;};
+        const render=async()=>{
+          mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:options.dark?'dark':'default',fontFamily:'-apple-system, BlinkMacSystemFont, sans-serif'});
+          const stage=document.createElement('div');stage.style.cssText='position:absolute;left:-100000px;top:0;width:100%;visibility:hidden';
+          document.body.append(stage);
+          try{svg=(await mermaid.render(`mori-diagram-${jobId}`,source,stage)).svg;}
+          finally{stage.remove();}
+        };
         const done=diagramSerial.then(render);diagramSerial=done.catch(()=>{});await done;
         if(svgCache.size>=200)svgCache.delete(svgCache.keys().next().value!);
         svgCache.set(key,svg);

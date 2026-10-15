@@ -269,3 +269,7 @@ test('reference commands reject duplicate or invalid explicit labels', () => {
   assert.throws(() => applyCommand('[^x]: old', { from: 0, to: 0 }, { type: 'footnote', value: 'x' }), RangeError);
   assert.throws(() => applyCommand('a', { from: 0, to: 1 }, { type: 'linkReference', value: { label: 'bad\nlabel', url: 'x' } }), RangeError);
 });
+commandCase('mac editing audit: clear selected bold content removes its surrounding markers', '앞 **한😀글** 뒤', {from:4,to:8}, 'clearFormat', '앞 한😀글 뒤', {from:2,to:6});
+commandCase('mac editing audit: clear selected code content preserves literal Markdown punctuation', '앞 ``a`b`` 뒤', {from:4,to:7}, 'clearFormat', '앞 a`b 뒤', {from:2,to:5});
+commandCase('mac editing audit: clear formatting never removes literal intraword underscores', 'snake_case_', {from:6,to:10}, 'clearFormat', 'snake_case_', {from:6,to:10});
+commandCase('mac editing audit: clear formatting never removes an escaped opening marker', '\\*한글*', {from:2,to:4}, 'clearFormat', '\\*한글*', {from:2,to:4});

@@ -28,6 +28,7 @@ final class Bridge {
     let documents: DocumentStore
     let workspace: WorkspaceStore
     let settings: SettingsStore
+    private let pasteboard: NSPasteboard
     private let appIconController: AppIconController
     private let windowSessions:WindowSessionStore
     private let windowID:String
@@ -54,13 +55,14 @@ final class Bridge {
     private let spelling=SpellingService()
     var onReady: (() -> Void)?
 
-    init(webView: WKWebView, options: LaunchOptions,windowSessions:WindowSessionStore?=nil,settingsStore:SettingsStore?=nil,windowID:String=UUID().uuidString,initialSession:WindowSessionContent?=nil,inheritLegacySession:Bool=true,appIconController:AppIconController?=nil) {
+    init(webView: WKWebView, options: LaunchOptions,windowSessions:WindowSessionStore?=nil,settingsStore:SettingsStore?=nil,windowID:String=UUID().uuidString,initialSession:WindowSessionContent?=nil,inheritLegacySession:Bool=true,appIconController:AppIconController?=nil,pasteboard:NSPasteboard?=nil) {
         self.webView = webView
         webRoot = options.webRoot.resolvingSymlinksInPath()
         dataDirectory = options.dataDirectory
         documents = DocumentStore(dataDirectory: options.dataDirectory)
         workspace = WorkspaceStore(dataDirectory: options.dataDirectory)
         settings = settingsStore ?? SettingsStore(dataDirectory: options.dataDirectory)
+        self.pasteboard = pasteboard ?? .general
         self.appIconController = appIconController ?? AppIconController()
         self.windowSessions=windowSessions ?? WindowSessionStore(dataDirectory:options.dataDirectory)
         self.windowID=windowID;self.initialSession=initialSession;self.inheritLegacySession=inheritLegacySession
@@ -237,7 +239,15 @@ final class Bridge {
                 let snapshot=try await documents.verifySaved(id:id)
                 guard snapshot.path==path else {throw BridgeError.invalidRequest("Managed source does not match the original document binding")}
                 let result=try await workspace.manage(operation:operation,path:path,destination:destination)
-                let rebound=try await documents.rebind(id:id,path:operation=="trash" ? nil : result)
+                let rebound:DocumentSnapshot
+                do {rebound=try await documents.rebind(id:id,path:operation=="trash" ? nil : result)}
+                catch let bindingError {
+                    do {_ = try await workspace.manage(operation:"move",path:result,destination:path)}
+                    catch let rollbackError {
+                        throw DocumentError.io("\(bindingError.localizedDescription). File remains at \(result); restoring \(path) failed: \(rollbackError.localizedDescription)")
+                    }
+                    throw bindingError
+                }
                 if operation=="trash" {documentPaths.removeValue(forKey:id)} else {track(rebound)}
                 return .object(["path":.string(result),"document":try NativeReply.encode(rebound)])
             }
@@ -440,17 +450,35 @@ final class Bridge {
             track(snapshot)
             return try NativeReply.encode(snapshot)
         }
+        return try await importConvertedDocument(path: URL(fileURLWithPath: path).standardizedFileURL,
+            format: request.optionalString("format"), jobId: request.optionalString("jobId") ?? UUID().uuidString)
+    }
+    private func importConvertedDocument(path: URL, format: String?, jobId: String) async throws -> JSONValue {
         let executable = try await exporter.pandocExecutable()
-        let jobId = try request.optionalString("jobId") ?? UUID().uuidString
-        var arguments = ["--to=markdown", "--", path]
-        if let format = try request.optionalString("format") { arguments.insert("--from=\(format)", at: 0) }
-        let result = try await runner.run(jobId: jobId, executable: executable, arguments: arguments,
-                                         directory: URL(fileURLWithPath: path).deletingLastPathComponent().path)
-        try ExportController.check(result)
-        return try NativeReply.encode(await documents.create(text: result.stdout))
+        let root = dataDirectory.appendingPathComponent("unsaved", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let folder = "import-" + UUID().uuidString
+        let extraction = root.appendingPathComponent(folder, isDirectory: true)
+        try FileManager.default.createDirectory(at: extraction, withIntermediateDirectories: false)
+        do {
+            try Task.checkCancellation()
+            var arguments = ["--to=markdown", "--extract-media=\(folder)",
+                "--resource-path=\(path.deletingLastPathComponent().path)", "--", path.path]
+            if let format { arguments.insert("--from=\(format)", at: 0) }
+            let result = try await runner.run(jobId: jobId, executable: executable, arguments: arguments, directory: root.path)
+            try ExportController.check(result)
+            try Task.checkCancellation()
+            return try NativeReply.encode(await documents.create(text: result.stdout))
+        } catch let conversionError {
+            do { try FileManager.default.removeItem(at: extraction) }
+            catch let cleanupError {
+                throw DocumentError.io("\(conversionError.localizedDescription). Removing partial import assets at \(extraction.path) failed: \(cleanupError.localizedDescription)")
+            }
+            throw conversionError
+        }
     }
     private func clipboard(_ request: NativeRequest) throws -> JSONValue {
-        let board = NSPasteboard.general
+        let board = pasteboard
         switch try request.string("operation") {
         case "read":
             var result: [String: JSONValue] = [:]

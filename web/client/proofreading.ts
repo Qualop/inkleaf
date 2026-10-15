@@ -114,12 +114,22 @@ class ProofreadingPlugin {
   private schedule() {
     const generation=++this.generation;
     if(this.timer!==undefined)clearTimeout(this.timer);
+    this.timer=undefined;
+    if(this.destroyed || this.view.compositionStarted)return;
     this.timer=setTimeout(()=>{this.timer=undefined;void this.check(generation);},Math.max(0,Math.min(this.options.debounceMs??450,5000)));
   }
+  startComposition() {
+    ++this.generation;
+    if(this.timer!==undefined)clearTimeout(this.timer);
+    this.timer=undefined;this.close();
+  }
+  endComposition() {
+    queueMicrotask(()=>{if(!this.destroyed)this.schedule();});
+  }
   private async check(generation:number) {
-    if(this.destroyed || generation!==this.generation)return;
+    if(this.destroyed || generation!==this.generation || this.view.compositionStarted)return;
     const text=this.text(),doc=this.view.state.doc;
-    const current=()=>!this.destroyed && generation===this.generation && this.view.state.doc===doc && text===this.text();
+    const current=()=>!this.destroyed && generation===this.generation && !this.view.compositionStarted && this.view.state.doc===doc && text===this.text();
     if(this.options.enabled?.()===false) {
       if(current())this.view.dispatch({effects:setProofreadingResult.of({text,result:empty()})});return;
     }
@@ -171,6 +181,8 @@ export function showProofreadingSuggestions(view:EditorView):boolean {
 
 export function proofreading(options:ProofreadingOptions):Extension {
   const plugin=ViewPlugin.define(view=>{const value=new ProofreadingPlugin(view,options);plugins.set(view,value);return value;},{eventHandlers:{
+    compositionstart() {this.startComposition();return false;},
+    compositionend() {this.endComposition();return false;},
     click(event,view) {
       const mark=(event.target as Element|null)?.closest?.('[data-proofreading-from]');if(!mark)return false;
       const issue=view.state.field(proofreadingState).issues.find(issue=>issue.from===Number(mark.getAttribute('data-proofreading-from')));

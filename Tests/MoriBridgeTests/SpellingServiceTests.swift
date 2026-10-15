@@ -22,6 +22,53 @@ final class SpellingServiceTests: XCTestCase {
         guard case .object(let object) = value, case .array(let values) = object["issues"] else { return [] }
         return values.compactMap { if case .object(let issue) = $0 { return issue }; return nil }
     }
+    func testInstalledCheckerHealthySamplesAndLanguageBoundaries() async throws {
+        let service = SpellingService(), checker = NSSpellChecker.shared
+        let korean = "안녕하세요. 오늘은 문서를 작성합니다. 정상적인 한국어 문장입니다."
+        let english = "Hello. This is a normal English sentence. Today we are writing a document."
+        let samples = [("healthy-ko", korean), ("healthy-en", english), ("healthy-mixed", "😀 " + korean + "\r\n" + english),
+                       ("typo-en", "😀 This is mispeling."), ("typo-ko", "설겆이를 했어요. 됬어요.")]
+        for language in ["en", "ko"] {
+            for (name, text) in samples {
+                let value = service.check(text: text, language: language, ignoredWords: [])
+                let spans = issues(value).map { issue -> [String: Any] in
+                    guard case .number(let from) = issue["from"], case .number(let to) = issue["to"] else { return [:] }
+                    return ["word": (text as NSString).substring(with: NSRange(location: Int(from), length: Int(to-from))),
+                            "issue": JSONValue.object(issue).foundationValue]
+                }
+                let diagnostic: [String: Any] = ["requested": language, "sample": name, "text": text,
+                    "result": value.foundationValue, "spans": spans]
+                let bytes = try JSONSerialization.data(withJSONObject: diagnostic, options: [.sortedKeys])
+                print("SPELLING_PROBE " + String(decoding: bytes, as: UTF8.self))
+                if name.hasPrefix("healthy") {
+                    XCTAssertTrue(issues(value).isEmpty, "\(language) must not flag valid \(name): \(spans)")
+                }
+                if name == "typo-en", language == "en" {
+                    XCTAssertTrue(spans.contains { ($0["word"] as? String) == "mispeling" })
+                }
+                if name == "typo-ko", language == "ko" {
+                    XCTAssertTrue(spans.contains { ($0["word"] as? String) == "됬어요" })
+                }
+            }
+        }
+        print("SPELLING_AVAILABLE " + checker.availableLanguages.sorted().joined(separator: ","))
+    }
+    func testMixedLanguageChecksKeepTyposAndUTF16OffsetsWithoutForeignWordFlags() async throws {
+        guard NSSpellChecker.shared.availableLanguages.contains("ko") else { throw XCTSkip("Korean system checker is not installed") }
+        let text = "😀 안녕하세요.\r\nThis is mispeling. 됬어요. `mispeling 됬어요`"
+        let source = text as NSString, service = SpellingService()
+        let korean = issues(service.check(text: text, language: "ko-KR", ignoredWords: []))
+        let english = issues(service.check(text: text, language: "en", ignoredWords: []))
+        for (checked, word, correction) in [(korean, "됬어요", "됐어요"), (english, "mispeling", "misspelling")] {
+            XCTAssertEqual(checked.count, 1, "Only the requested language's prose typo should be marked: \(checked)")
+            let issue = try XCTUnwrap(checked.first), expected = source.range(of: word)
+            XCTAssertEqual(issue["from"], .number(Double(expected.location)))
+            XCTAssertEqual(issue["to"], .number(Double(NSMaxRange(expected))))
+            guard case .array(let suggestions) = issue["suggestions"] else { return XCTFail("Missing suggestions") }
+            XCTAssertTrue(suggestions.contains(.string(correction)))
+        }
+        XCTAssertTrue(issues(service.check(text: text, language: "ko", ignoredWords: ["됬어요"])).isEmpty)
+    }
     func testKoreanCommonSpellingAndSpacingWithUTF16Offsets() async {
         let text = "😀 시작\r\n설겆이를 했어요. 됬어요. 오랫만에 할수있어요."
         let checked = SpellingService.koreanIssues(text: text, ignoredWords: [])
