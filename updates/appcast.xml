@@ -1,0 +1,22 @@
+<?xml version="1.0" standalone="yes"?><!-- sparkle-sign-warning:
+IMPORTANT: This file was signed by Sparkle. Any modifications to this file requires re-signing this file with generate_appcast or sign_update! The signed signature will be embedded at the end of this file.
+--><rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Inkleaf</title>
+        <item>
+            <title>0.1.3</title>
+            <pubDate>Thu, 15 Oct 2026 13:53:55 +0900</pubDate>
+            <link>https://github.com/Qualop/inkleaf</link>
+            <sparkle:version>0.1.3</sparkle:version>
+            <sparkle:shortVersionString>0.1.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.5</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<p>Inkleaf 0.1.3 includes the latest Mac improvements. Your documents remain in their current locations.</p>
+]]></description>
+            <enclosure url="https://github.com/Qualop/inkleaf/releases/download/v0.1.3/Inkleaf-0.1.3-macOS-arm64.dmg" length="71268146" type="application/octet-stream" sparkle:edSignature="aSVTBSuKEfr13JTdeX8Sb7KmtxmKoLHYT0ni6J4oJuPQtoZRcWJTTv2sVYQpGxR+9CmrlHNm/RKVA5rI3fHACQ=="></enclosure>
+        </item>
+    </channel>
+</rss><!-- sparkle-signatures:
+edSignature: joQtxJgMOWabJLtDb8XYt7PGToMpPQW+XeS9Ag3lCynRTbUjv92YvrhIo1j4B+Ze29Ar/uo6PdmQ47PJXxb9BA==
+length: 1352
+-->
