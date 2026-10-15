@@ -13,6 +13,9 @@ test('Imported document selectors and nested media rules target only Mori docume
   assert.match(css,/\.mori-app\[data-document-theme\]\{--bg-color/);assert.match(css,/\.cm-content/);assert.match(css,/\.reading/);
   assert.doesNotMatch(css,/#write|(?:^|\})\s*body\{/);
   assert.match(css,/@media\(max-width:600px\)/);assert.match(css,/padding:12px/);
+  const surfaces=scopeThemeCSS('#document-sidebar{color:red} #document-source .cm-line{color:blue}');
+  assert.match(surfaces,/\.mori-app \.sidebar\{color:red\}/);
+  assert.match(surfaces,/\.mori-app \.cm-editor\[data-mode="source"\] \.cm-content \.cm-line\{color:blue\}/);
 });
 test('theme selector parsing retains commas in functional selectors, strings and comments',()=>{
   const css=scopeThemeCSS('#write :is(h1,h2){font-family:"A,B";content:"}"} /* ok */ @supports(display:grid){p{color:red}}');

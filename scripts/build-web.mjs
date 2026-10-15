@@ -4,9 +4,10 @@ import path from 'node:path';
 const root=path.resolve(import.meta.dirname,'..');
 const out=path.join(root,'web/dist');
 await mkdir(out,{recursive:true});
+await rm(path.join(out,'app.js.map'),{force:true});
 await rm(path.join(out,'vendor'),{recursive:true,force:true});
 await build({entryPoints:[path.join(root,'web/client/app.ts')],bundle:true,format:'iife',target:'safari17.4',
-  outfile:path.join(out,'app.js'),sourcemap:true,minify:false,logLevel:'warning'});
+  outfile:path.join(out,'app.js'),sourcemap:false,minify:false,logLevel:'warning'});
 await cp(path.join(root,'web/index.html'),path.join(out,'index.html'));
 await cp(path.join(root,'web/style.css'),path.join(out,'style.css'));
 await mkdir(path.join(out,'icons'),{recursive:true});
