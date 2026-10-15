@@ -53,4 +53,4 @@ The native module retains the internal name `Mori`; the app and executable are I
 
 ## Documentation
 
-The main README is English; `README.ko.md` is its Korean counterpart. User-guide pages live in `docs/guide/` and `docs/guide/ko/`. Each topic links to its translation and neighboring topics. Screenshots use the included synthetic examples, not personal documents. See [screenshot notes](screenshots/README.md).
+The main README is English; `README.ko.md` is its Korean counterpart. User-guide pages live in `docs/guide/` and `docs/guide/ko/`. Each topic links to its translation and neighboring topics. Screenshots use the included synthetic examples, not personal documents.

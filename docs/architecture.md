@@ -10,7 +10,7 @@ Inkleaf has a native macOS AppKit host. It loads the local TypeScript editor in 
 - `web/client`: editor interactions, global/document preferences and dialogs.
 - `web/core` and `web/render`: document operations, Markdown and preview rendering.
 - `resources`: the two selected app icon source images.
-- `scripts`: web/native build, verified Pandoc acquisition, installers and source export.
+- `scripts`: web/native build, verified Pandoc acquisition, installers.
 
 ## Icon preference
 
