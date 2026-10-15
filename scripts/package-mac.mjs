@@ -21,7 +21,7 @@ await run('/usr/bin/codesign',['--verify','--deep','--strict',app]);
 await mkdir(output,{recursive:true});
 await rm(staging,{recursive:true,force:true});
 await mkdir(staging,{recursive:true});
-await cp(app,path.join(staging,'Inkleaf.app'),{recursive:true,preserveTimestamps:true});
+await cp(app,path.join(staging,'Inkleaf.app'),{recursive:true,preserveTimestamps:true,verbatimSymlinks:true});
 await symlink('/Applications',path.join(staging,'Applications'));
 await writeFile(path.join(staging,'Read Me.txt'),`Inkleaf ${version}\n\nDrag Inkleaf.app to Applications, or use the separate PKG installer.\nRequires macOS 14.5 or later; this build is for ${process.arch}.\n\nThis community build has a local ad-hoc code signature. It is not Developer ID signed or notarized. macOS may ask you to approve opening it in System Settings > Privacy & Security.\n\nApp icon: Settings > Appearance > App Icon. Black Ink is the default; Green Leaf is optional. The selection changes the running app's Dock/app-switcher icon. Finder and installers use Black Ink.\n\nLicense: MIT for Inkleaf source; see bundled component notices for third-party licenses.\n`);
 await cp(path.join(root,'LICENSE'),path.join(staging,'LICENSE.txt'));
@@ -29,6 +29,10 @@ await run('/usr/bin/hdiutil',['create','-volname','Inkleaf','-srcfolder',staging
 await run('/usr/bin/pkgbuild',['--component',app,'--install-location','/Applications','--identifier','dev.inkleaf.editor.pkg','--version',version,'--ownership','recommended',path.join(output,`${stem}.pkg`)]);
 const lines=[];
 const files=[`${stem}.dmg`,`${stem}.pkg`];
+if(!process.argv.includes('--skip-update-feed')){
+  await run(process.execPath,[path.join(root,'scripts/prepare-update.mjs')]);
+  files.push('appcast.xml','update-manifest.json');
+}
 const pandocSource='pandoc-3.12.1-source.tar.gz';
 if(existsSync(path.join(output,pandocSource)))files.push(pandocSource);
 for(const name of files){

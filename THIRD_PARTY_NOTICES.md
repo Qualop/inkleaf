@@ -11,3 +11,4 @@ The bundled Pandoc version and official archive/binary checksums are recorded in
 - https://github.com/jgm/pandoc/releases/tag/3.12.1
 - https://github.com/jgm/pandoc/archive/refs/tags/3.12.1.tar.gz
 
+macOS updates use Sparkle 2.10.0, distributed under its BSD license and bundled third-party notices. The complete text is included at `Contents/Resources/SPARKLE_LICENSE.txt` and `tools/SPARKLE_LICENSE.txt`. The framework is pinned to the official release and SwiftPM binary checksum. Source and releases: https://github.com/sparkle-project/Sparkle

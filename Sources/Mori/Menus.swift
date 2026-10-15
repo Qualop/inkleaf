@@ -2,7 +2,7 @@ import AppKit
 import DocumentCore
 
 @MainActor
-final class Menus: NSObject {
+final class Menus: NSObject, NSMenuItemValidation {
     private static var language = "ko"
     private static weak var installed: Menus?
     private let send: (NativeCommand) -> Void
@@ -12,6 +12,7 @@ final class Menus: NSObject {
     private var menuTitles: [(NSMenu, String, String)] = []
     private var servicesMenu: NSMenu?
     private var windowMenu: NSMenu?
+    var updateState: (() -> (canCheck: Bool, automatic: Bool))?
 
     init(send: @escaping (NativeCommand) -> Void) { self.send = send }
 
@@ -36,6 +37,8 @@ final class Menus: NSObject {
         let bar = NSMenu()
         let app = submenu("Inkleaf", in: bar)
         native("About Inkleaf", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), in: app)
+        command("Check for Updates…", "checkUpdates", in: app)
+        command("Automatically Check for Updates", "toggleAutomaticUpdates", in: app)
         app.addItem(.separator())
         command("Settings…", "settings", key: ",", in: app)
         let language = submenu("Language", in: app)
@@ -239,6 +242,14 @@ final class Menus: NSObject {
         return bar
     }
 
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard let state = updateState?() else { return true }
+        switch commands[menuItem.tag]?.type {
+        case "checkUpdates": return state.canCheck
+        case "toggleAutomaticUpdates": menuItem.state = state.automatic ? .on : .off; return true
+        default: return true
+        }
+    }
     @objc private func invoke(_ sender: NSMenuItem) {
         if let command = commands[sender.tag] { send(command) }
     }
@@ -281,7 +292,7 @@ final class Menus: NSObject {
     }
     private static let koreanLabels: [String: String] = [
         "File": "파일", "Edit": "편집", "Paragraph": "문단", "Format": "서식", "View": "보기", "Proofreading": "교정", "Themes": "테마", "Tools": "도구", "Window": "창",
-        "About Inkleaf": "Inkleaf에 관하여", "Settings…": "설정…", "Language": "언어", "Services": "서비스", "Hide Inkleaf": "Inkleaf 가리기", "Hide Others": "기타 가리기", "Show All": "모두 보기", "Quit Inkleaf": "Inkleaf 종료",
+        "About Inkleaf": "Inkleaf에 관하여", "Check for Updates…": "업데이트 확인…", "Automatically Check for Updates": "자동으로 업데이트 확인", "Settings…": "설정…", "Language": "언어", "Services": "서비스", "Hide Inkleaf": "Inkleaf 가리기", "Hide Others": "기타 가리기", "Show All": "모두 보기", "Quit Inkleaf": "Inkleaf 종료",
         "New": "새로 만들기", "New Window": "새 창 열기", "Open…": "열기…", "Open Folder…": "폴더 열기…", "Quick Open…": "빠른 열기…", "Pin / Unpin Folder": "폴더 고정 / 해제",
         "Save": "저장", "Save As…": "별도 저장…", "Save All": "모두 저장", "Duplicate": "복제", "Document Properties…": "문서 속성…", "Document File Tools…": "문서 파일 관리…", "Recover Unsaved Documents…": "저장하지 않은 문서 복구…",
         "Close Document": "문서 닫기", "Close All Documents": "모든 문서 닫기", "Reopen Closed Document": "닫은 문서 다시 열기", "Close Window": "창 닫기",

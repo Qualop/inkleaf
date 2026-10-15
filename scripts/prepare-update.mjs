@@ -1,0 +1,20 @@
+import {readFile,mkdir,cp,rm,writeFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import path from 'node:path';
+import {prepareSparkle,run,sparkleAccount} from './prepare-sparkle.mjs';
+
+const root=path.resolve(import.meta.dirname,'..'),{version}=JSON.parse(await readFile(path.join(root,'package.json'),'utf8'));
+if(process.platform!=='darwin')throw new Error('Update signing requires macOS and the release signing Keychain account.');
+if(!/^\d+\.\d+\.\d+$/.test(version))throw new Error('Expected a stable release version.');
+const tools=await prepareSparkle(),publicKey=(await readFile(path.join(root,'resources/update-public-key.txt'),'utf8')).trim();
+const signingPublicKey=await run(path.join(tools,'bin/generate_keys'),['--account',sparkleAccount,'-p'],{capture:true});
+if(signingPublicKey!==publicKey)throw new Error('The release signing account does not match the embedded public key.');
+const name=`Inkleaf-${version}-macOS-${process.arch}.dmg`,archive=path.join(root,'dist',name);
+const staging=path.join(root,'.cache',`update-feed-${version}`);
+await rm(staging,{recursive:true,force:true});await mkdir(staging,{recursive:true});await cp(archive,path.join(staging,name));
+await writeFile(path.join(staging,name.replace(/\.dmg$/,'.html')),'<p>Inkleaf '+version+' includes the latest Mac improvements. Your documents remain in their current locations.</p>\n');
+await run(path.join(tools,'bin/generate_appcast'),['--account',sparkleAccount,'--maximum-deltas','0','--download-url-prefix',`https://github.com/Qualop/inkleaf/releases/download/v${version}/`,'--link','https://github.com/Qualop/inkleaf','--embed-release-notes',staging]);
+const feed=path.join(staging,'appcast.xml');await run(path.join(tools,'bin/sign_update'),['--account',sparkleAccount,'--verify',feed]);
+await cp(feed,path.join(root,'dist/appcast.xml'));
+const bytes=await readFile(archive);await writeFile(path.join(root,'dist/update-manifest.json'),JSON.stringify({version,archive:name,length:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex'),publicKey,feed:'https://raw.githubusercontent.com/Qualop/inkleaf/main/updates/appcast.xml'},null,2)+'\n');
+console.log('Signed update feed: dist/appcast.xml. Publish the archive before publishing this feed.');

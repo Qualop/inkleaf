@@ -74,3 +74,7 @@ Inkleaf는 로컬 Markdown 파일을 작성하는 앱입니다. DMG를 열어 �
 설정의 **모양과 테마 → 앱 아이콘**에서 기본 검은 잉크와 초록 잎 아이콘을 선택할 수 있습니다. 선택은 앱 전체에 저장되며 재실행해도 유지됩니다. Finder와 설치 파일에는 기본 아이콘을 사용합니다.
 
 첫 공개 빌드는 Developer ID 서명과 Apple 공증을 받지 않았습니다. macOS에서 실행 승인을 요청할 수 있습니다. 기존 Mori 문서·설정은 보존하며 새 설치에서는 Inkleaf 데이터 폴더를 사용합니다.
+
+## Mac updates
+
+From 0.1.3, use Inkleaf > Check for Updates… to install new signed releases. Automatic checks can be toggled in the same menu. Older versions need one ordinary installation. See [update instructions](docs/updates.md).

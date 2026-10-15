@@ -60,6 +60,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowSessions:WindowSessionStore?
     private var settingsStore:SettingsStore?
     private let appIconController = AppIconController()
+    private let appUpdates = AppUpdateController()
     private var startupComplete=false
     private var queuedOpenFiles:[String]=[]
 
@@ -68,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             let options = try LaunchOptions()
             self.options = options
             menus = Menus { [weak self] command in self?.send(command) }
+            menus?.updateState = { [weak self] in self?.appUpdates.state ?? (false, false) }
             menus?.install()
             let sessions=WindowSessionStore(dataDirectory:options.dataDirectory);windowSessions=sessions;settingsStore=SettingsStore(dataDirectory:options.dataDirectory)
             Task{@MainActor [weak self] in
@@ -79,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }catch{newWindow();let alert=NSAlert(error:error);if let window=windows.first?.window{await alert.beginSheetModal(for:window)}}
                 startupComplete=true;for path in queuedOpenFiles{windows.last?.enqueueOpen(path)};queuedOpenFiles=[]
                 NSApplication.shared.activate(ignoringOtherApps:true)
+                appUpdates.start()
             }
         } catch { NSAlert(error: error).runModal(); NSApplication.shared.terminate(nil) }
     }
@@ -92,6 +95,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.showWindow(nil)
     }
     private func send(_ command: NativeCommand) {
+        if command.type == "checkUpdates" { appUpdates.checkForUpdates(); return }
+        if command.type == "toggleAutomaticUpdates" { appUpdates.toggleAutomaticChecks(); return }
         if command.type == "newWindow" { newWindow(); return }
         let controller = windows.first { $0.window === NSApplication.shared.keyWindow } ?? windows.last
         if command.type == "nativePrint" { controller?.printDocument(); return }

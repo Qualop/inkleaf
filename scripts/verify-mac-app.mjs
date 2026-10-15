@@ -73,7 +73,7 @@ await writeFile(path.join(directory,'index.html'),`<!doctype html><html><head><m
 const env={...process.env,INKLEAF_MAC_AUDIT_WEB_ROOT:directory,DEVELOPER_DIR:'/Applications/Xcode.app/Contents/Developer',CLANG_MODULE_CACHE_PATH:path.join(root,'.cache/clang'),SWIFTPM_MODULECACHE_OVERRIDE:path.join(root,'.cache/ModuleCache')};
 const log=path.join(directory,'native.log');
 const code=await new Promise((resolve,reject)=>{
- const child=spawn('swift',['test','--disable-sandbox','--scratch-path','.build-audit-app','--filter','MacWorkflowAuditTests'],{cwd:root,env,stdio:['ignore','pipe','pipe']});
+ const child=spawn('swift',['test','--disable-keychain','--disable-sandbox','--scratch-path','.build-audit-app','--filter','MacWorkflowAuditTests'],{cwd:root,env,stdio:['ignore','pipe','pipe']});
  const output=[];child.stdout.on('data',chunk=>output.push(chunk));child.stderr.on('data',chunk=>output.push(chunk));
  const timer=setTimeout(()=>child.kill('SIGTERM'),180000);
  child.once('error',reject);child.once('exit',async code=>{clearTimeout(timer);await writeFile(log,Buffer.concat(output));resolve(code??1);});
